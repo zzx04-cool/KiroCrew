@@ -43,7 +43,10 @@ from kiro_crew.dashboard.chat_utils import (
 )
 from kiro_crew.dashboard.state import _ChatSlot
 from kiro_crew.mcp_utils import mcp_server_alias
-from kiro_crew.security import oauth_url_contains_credential
+from kiro_crew.security import (
+    diagnose_oauth_url_credential,
+    oauth_url_contains_credential,
+)
 
 # ── _is_safe_oauth_url ──
 
@@ -1361,6 +1364,234 @@ class TestLegitOAuthUrlCorpus:
         assert meta.get("rejected_url") is not True, f"{provider}: wrongly rejected"
         assert meta.get("failed") is not True, f"{provider}: wrongly marked failed"
         assert meta["oauth_url"] == url
+
+
+class TestJwsClientIdCarveOut:
+    """Contract: a compact-JWS ``client_id`` is accepted at ClickUp's exact
+    authorization endpoint only, and the carve-out widens nothing else.
+
+    Each rejection case differs from the accepted URL in one way.
+    """
+
+    _JWS = (
+        "mcp-client-eyJhbGciOiJIUzI1NiIsImtpZCI6IjEifQ"
+        ".eyJ0b2tlblR5cGUiOiJqd3RfY2xpZW50X2lkIiwiaXNzIjoiZXhhbXBsZS1tY3Atc2VydmVyIn0"
+        ".AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+    )
+    # Split so the literals do not read as live keys to a secret scanner.
+    _MARKER = "AKIA" + "IOSFODNN7EXAMPLED"
+    _BARE_SECRET = "wJalrXUtnFEMI" + "K7MDENGbPxRfiCYEXAMPLEKEYab"
+    _TAIL = (
+        "&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        "&code_challenge_method=S256"
+        "&redirect_uri=http%3A%2F%2Flocalhost%3A60527%2Foauth%2Fcallback"
+        "&scope=read+write"
+    )
+    _STATE = "&state=ff0238a7-a768-425d-94a9-ad87e798fafb"
+
+    @staticmethod
+    def _b64(raw: bytes | dict) -> str:
+        import base64
+
+        data = raw if isinstance(raw, bytes) else json.dumps(raw).encode()
+        return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+    def _url(self, *, host: str = "mcp.clickup.com", scheme: str = "https",
+             path: str = "/oauth/authorize", key: str = "client_id",
+             client_id: str | None = None, state: str | None = None) -> str:
+        return (
+            f"{scheme}://{host}{path}"
+            "?response_type=code"
+            f"&{key}={self._JWS if client_id is None else client_id}"
+            f"{self._STATE if state is None else f'&state={state}'}"
+            f"{self._TAIL}"
+        )
+
+    def test_jws_client_id_is_accepted_at_clickup(self):
+        assert oauth_url_contains_credential(self._url()) is False
+
+    def test_opaque_client_id_is_still_accepted(self):
+        assert oauth_url_contains_credential(self._url(client_id="0b3f1c8e4a2d")) is False
+
+    @pytest.mark.parametrize(
+        "case,url_kwargs",
+        [
+            ("unapproved_host", {"host": "evil.example.com"}),
+            ("other_approved_endpoint_gitlab", {"host": "gitlab.com"}),
+            (
+                "other_approved_endpoint_github",
+                {"host": "github.com", "path": "/login/oauth/authorize"},
+            ),
+            ("unapproved_path", {"path": "/not/authorize"}),
+            ("explicit_port", {"host": "mcp.clickup.com:8443"}),
+            ("http_scheme", {"scheme": "http"}),
+            ("case_variant_param_name", {"key": "Client_Id"}),
+        ],
+    )
+    def test_endpoint_and_parameter_identity_are_required(self, case, url_kwargs):
+        """The exemption is keyed to ClickUp's endpoint and the exact param name."""
+        assert oauth_url_contains_credential(self._url(**url_kwargs)) is True, case
+
+    def test_operator_endpoint_approval_does_not_extend_the_exemption(self):
+        url = self._url(host="evil.example.com")
+        assert diagnose_oauth_url_credential(url, assume_approved_endpoint=True) is not None
+
+    @pytest.mark.parametrize(
+        "case,client_id",
+        [
+            ("credential_marker", _MARKER),
+            ("single_separator", f"aaa.{_MARKER}"),
+            ("standard_base64_alphabet", f"ab+cd.ef/gh.{_MARKER}"),
+            ("double_encoded", f"aaa.bbb.%2543%2541%2Fx{_MARKER}"),
+            ("percent_encoded_separator", _JWS.replace(".", "%2E")),
+            ("credential_in_segment_no_header", f"aaa.bbb.{_MARKER}"),
+            (
+                "credential_in_segment_with_real_header",
+                "eyJhbGciOiJIUzI1NiJ9.eyJ4IjoxfQ." + _MARKER,
+            ),
+        ],
+    )
+    def test_only_the_compact_jws_shape_earns_the_exemption(self, case, client_id):
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True, case
+
+    def test_a_real_bearer_jwt_is_refused_at_github(self):
+        jwt = ".".join((
+            self._b64({"alg": "HS256", "typ": "JWT"}),
+            self._b64({"sub": "1234567890", "iat": 1516239022}),
+            self._b64(bytes(range(32))),
+        ))
+        url = self._url(host="github.com", path="/login/oauth/authorize", client_id=jwt)
+        assert oauth_url_contains_credential(url) is True
+
+    @pytest.mark.parametrize("host", ["github.com", "mcp.clickup.com"])
+    def test_alg_none_header_with_a_bare_secret_is_refused(self, host):
+        path = "/login/oauth/authorize" if host == "github.com" else "/oauth/authorize"
+        client_id = f"{self._b64({'alg': 'none'})}.x.{self._BARE_SECRET}"
+        assert oauth_url_contains_credential(
+            self._url(host=host, path=path, client_id=client_id)
+        ) is True
+
+    @pytest.mark.parametrize("alg", ["none", None])
+    def test_an_unsigned_header_is_refused_at_clickup(self, alg):
+        header = self._b64({"alg": alg} if alg else {"typ": "JWT"})
+        client_id = f"{header}.{self._b64({'x': 1})}.{self._BARE_SECRET}"
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True
+
+    @pytest.mark.parametrize("shape", ["as_payload_and_sig", "reordered", "nested_in_payload"])
+    def test_a_dashboard_link_token_inside_client_id_is_refused_at_clickup(self, shape):
+        from kiro_crew.dashboard.token_auth import generate_token
+
+        token = generate_token("chat-1", register_nonce=False)
+        body, sig = token.split(".")
+        hs256 = self._b64({"alg": "HS256"})
+        client_id = {
+            "as_payload_and_sig": f"{hs256}.{token}",
+            "reordered": f"{sig}{hs256}.{self._b64({'x': 1})}.{body[:43]}",
+            "nested_in_payload": f"{hs256}.{self._b64({'t': token})}.{sig}",
+        }[shape]
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True
+
+    def _hs256(self, payload: dict | None = None, sig: str = "A" * 43) -> str:
+        header = self._b64({"alg": "HS256"})
+        return f"{header}.{self._b64(payload or {'x': 1})}.{sig}"
+
+    def test_a_credential_inside_the_decoded_payload_is_refused(self):
+        client_id = self._hs256({"k": self._MARKER})
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True
+
+    def test_a_bare_secret_inside_the_decoded_payload_is_refused(self):
+        client_id = self._hs256({"k": self._BARE_SECRET})
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True
+
+    @pytest.mark.parametrize(
+        "case,client_id_fn",
+        [
+            ("bare_secret_as_short_sig", lambda t: t._hs256(sig=t._BARE_SECRET)),
+            ("oversized_sig", lambda t: t._hs256(sig="A" * 56_000)),
+            ("upper_case_none", lambda t: f"{t._b64({'alg': 'NONE'})}.{t._b64({'x': 1})}.{'A' * 43}"),
+            ("unhashable_alg", lambda t: f"{t._b64({'alg': [1]})}.{t._b64({'x': 1})}.{'A' * 43}"),
+            ("unknown_label", lambda t: "evil-" + t._hs256()),
+        ],
+    )
+    def test_the_signature_must_fit_its_alg_exactly(self, case, client_id_fn):
+        url = self._url(client_id=client_id_fn(self))
+        assert oauth_url_contains_credential(url) is True, case
+
+    @staticmethod
+    def _escaped(text: str) -> str:
+        return "".join(f"\\u{ord(c):04x}" for c in text)
+
+    _PAT = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+    @pytest.mark.parametrize(
+        "case,payload_json",
+        [
+            ("u_escaped_ghp_token", lambda t: json.dumps({"k": "@"}).replace("@", t._escaped(t._PAT))),
+            ("u_escaped_aws_key_id", lambda t: json.dumps({"k": "@"}).replace("@", t._escaped(t._MARKER))),
+            ("split_by_slash_escapes", lambda t: json.dumps({"k": t._BARE_SECRET}).replace("M", "M\\/")),
+            ("credential_as_json_key", lambda t: json.dumps({t._PAT: 1})),
+            ("u_escaped_json_key", lambda t: json.dumps({"@": 1}).replace("@", t._escaped(t._MARKER))),
+            ("nested_in_array_and_object", lambda t: json.dumps({"a": [{"b": ["@"]}]}).replace("@", t._escaped(t._PAT))),
+        ],
+    )
+    def test_a_json_escaped_or_nested_credential_in_the_payload_is_refused(
+        self, case, payload_json
+    ):
+        import base64
+
+        raw = payload_json(self).encode()
+        payload = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        header = self._b64({"alg": "HS256"})
+        client_id = f"{header}.{payload}.{'A' * 43}"
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True, case
+
+    @pytest.mark.parametrize(
+        "case,payload_json",
+        [
+            (
+                "duplicate_key_hides_escaped_pat",
+                lambda t: '{"k":"@","k":0}'.replace("@", t._escaped(t._PAT)),
+            ),
+            (
+                "nested_duplicate_key_hides_pat",
+                lambda t: '{"a":{"k":"@","k":0}}'.replace("@", t._PAT),
+            ),
+            ("duplicate_key_in_header_only", lambda t: '{"x":1,"x":2}'),
+            ("any_backslash_escape", lambda t: json.dumps({"k": "a\\nb"})),
+            ("escaped_quote", lambda t: json.dumps({"k": 'a"b'})),
+        ],
+    )
+    def test_a_repeated_key_or_any_escape_is_refused(self, case, payload_json):
+        import base64
+
+        raw = payload_json(self).encode()
+        payload = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        header = self._b64({"alg": "HS256"})
+        client_id = f"{header}.{payload}.{'A' * 43}"
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True, case
+
+    def test_a_repeated_key_in_the_header_is_refused(self):
+        import base64
+
+        header = base64.urlsafe_b64encode(b'{"alg":"none","alg":"HS256"}').decode().rstrip("=")
+        client_id = f"{header}.{self._b64({'x': 1})}.{'A' * 43}"
+        assert oauth_url_contains_credential(self._url(client_id=client_id)) is True
+
+    def test_a_digest_sized_signature_is_accepted(self):
+        assert oauth_url_contains_credential(self._url(client_id=self._hs256())) is False
+
+    def test_a_marker_in_state_is_still_caught_beside_a_jws_client_id(self):
+        assert oauth_url_contains_credential(self._url(state=self._MARKER)) is True
+
+    def test_a_marker_in_an_unknown_param_is_still_caught(self):
+        url = self._url() + f"&debug_key={self._MARKER}"
+        assert oauth_url_contains_credential(url) is True
+
+    def test_a_deeply_nested_json_header_does_not_crash_the_gate(self):
+        """An oversized or deeply nested header is judged, never raised out."""
+        run = self._b64(b'{"alg":' + b"[" * 100_000 + b"]" * 100_000 + b"}")
+        verdict = oauth_url_contains_credential(self._url(client_id=f"{run}.eyJ.AAAA"))
+        assert isinstance(verdict, bool)
 
 
 class TestOAuthParamCredentialScan:

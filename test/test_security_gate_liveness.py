@@ -256,7 +256,19 @@ def _url_payload_command(n: int) -> str:
 #: data-consumer exemption. The branch grows a ``(?<!^-)`` guard and its comment states
 #: which terminal ``e`` is the command. Every execute construct it read before is still
 #: read; no other pattern moved.
-_PACKAGE_LINE_BUDGET = 28_864
+#:
+#: Raised again, from 28,864, for ``exfil._blank_clickup_jws_client_id``: ClickUp's
+#: registration issues a compact-JWS ``client_id`` the JWS credential signature
+#: cannot tell from a bearer token, so its consent URL never rendered. The carve-out
+#: is pinned to ClickUp's one authorization endpoint and to a value whose header is
+#: a JOSE object whose ``alg`` fixes the signature's exact length, whose payload is
+#: not a dashboard link token, and whose segments, decoded text and every unescaped
+#: JSON key and string value hold no fixed credential or bare secret, with no
+#: backslash and no repeated key in the decoded JSON. A bearer JWT
+#: elsewhere, an ``alg=none`` header with a
+#: bare secret, and a link token inside ``client_id`` stay refused. No pattern
+#: moved and no other endpoint gained an exemption.
+_PACKAGE_LINE_BUDGET = 28_966
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

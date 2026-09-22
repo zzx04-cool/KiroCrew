@@ -17,6 +17,7 @@ anything here.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import contextvars
 import fnmatch
@@ -291,6 +292,7 @@ _OAUTH_AUTHORIZATION_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
         # MCP authorization server here too.
         ("access.stripe.com", "/mcp/oauth2/authorize"),
         ("gitlab.com", "/oauth/authorize"),
+        ("mcp.clickup.com", "/oauth/authorize"),
         ("mcp.auth.mail.superhuman.com", "/oauth2/authorize"),
         ("mcp.linear.app", "/authorize"),
         # Miro's authorization_endpoint per its RFC 8414 metadata at
@@ -1646,6 +1648,105 @@ def _oauth_credential_scan_target(
     return url[: query_start + 1] + sanitized_query + suffix
 
 
+_B64URL_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_")
+
+# Base64url length of each JOSE ``alg``'s signature (RFC 7518; RSA at 2048, 3072
+# and 4096 bits), so the signature segment holds one digest and nothing longer.
+_JWS_SIGNATURE_LENGTHS: dict[str, tuple[int, ...]] = {
+    "HS256": (43,), "HS384": (64,), "HS512": (86,), "EdDSA": (86,),
+    "ES256": (86,), "ES384": (128,), "ES512": (176,),
+    **dict.fromkeys(("RS256", "RS384", "RS512", "PS256", "PS384", "PS512"), (342, 512, 683)),
+}  # fmt: skip
+
+
+def _unique_keys_object(pairs: list[tuple[str, object]]) -> dict:
+    """``object_pairs_hook`` refusing a repeated key, which would drop a value unseen."""
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("duplicate JSON key")
+    return value
+
+
+def _b64url_json_object(run: str, cap: int) -> tuple[dict, str] | None:
+    """Decode a capped base64url run to (JSON object, its text), else None. Never raises.
+
+    The text may hold no backslash and no repeated key, so every value the parser
+    keeps appears verbatim in the text the credential scans read.
+    """
+    if len(run) > cap:
+        return None
+    try:
+        text = base64.urlsafe_b64decode(run + "=" * (-len(run) % 4)).decode()
+        if "\\" in text:
+            return None
+        value = json.loads(text, object_pairs_hook=_unique_keys_object)
+    except (ValueError, RecursionError):
+        return None
+    return (value, text) if isinstance(value, dict) else None
+
+
+def _is_clickup_jws_client_id(value: str) -> bool:
+    """True for a compact-JWS ``client_id`` such as ClickUp's registration issues.
+
+    Pure base64url plus two dots, so no ``%`` form decodes differently. The
+    header (after an optional ``mcp-client-`` label) is a JOSE object whose
+    ``alg`` fixes the signature's exact length; the payload is a JSON object that
+    is not a dashboard link token. Every segment and the decoded header and
+    payload still face the fixed-credential scan, and the decoded text faces the
+    bare-secret scan. Only the digest-sized signature leaves the bare-secret scan.
+    """
+    segments = value.split(".")
+    if len(segments) != 3 or not all(s and _B64URL_ALPHABET.issuperset(s) for s in segments):
+        return False
+    header = _b64url_json_object(segments[0].removeprefix("mcp-client-"), 256)
+    payload = _b64url_json_object(segments[1], 1024)
+    if header is None or payload is None or "session_exp" in payload[0]:
+        return False
+    alg = header[0].get("alg")
+    lengths = _JWS_SIGNATURE_LENGTHS.get(alg, ()) if isinstance(alg, str) else ()
+    if len(segments[2]) not in lengths:
+        return False
+    # JSON escapes (``\uXXXX``, ``\/``) hide a credential from the raw text, so
+    # every key and string value of the parsed objects is scanned unescaped too.
+    texts = [header[1], payload[1]]
+    stack: list[object] = [header[0], payload[0]]
+    while stack:
+        node = stack.pop()
+        texts.append(json.dumps(node, ensure_ascii=False))
+        if isinstance(node, dict):
+            texts.extend(k for k in node if isinstance(k, str))
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            texts.append(node)
+    return not any(
+        _contains_fixed_credential(t) or _text_contains_bare_secret(t) for t in texts
+    ) and not any(_contains_fixed_credential(s) for s in segments)
+
+
+def _blank_clickup_jws_client_id(url: str) -> str:
+    """Blank a compact-JWS ``client_id`` at ClickUp's exact endpoint only.
+
+    The JWS credential signature cannot tell that identifier from a bearer JWT,
+    so it is withheld from every later scan there and nowhere else: no other
+    host, no explicit port, no ``http``, no fragment, no operator endpoint.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.port is not None or parsed.fragment:
+            return url
+    except ValueError:
+        return url
+    if (parsed.hostname, parsed.path) != ("mcp.clickup.com", "/oauth/authorize"):
+        return url
+    query = "&".join(
+        "client_id=" if s.startswith("client_id=") and _is_clickup_jws_client_id(s[10:]) else s
+        for s in parsed.query.split("&")
+    )
+    return url if query == parsed.query else url.replace(f"?{parsed.query}", f"?{query}", 1)
+
+
 def diagnose_oauth_url_credential(
     url: str, *, assume_approved_endpoint: bool = False
 ) -> OAuthUrlCredentialDiagnostic | None:
@@ -1662,6 +1763,7 @@ def diagnose_oauth_url_credential(
     if not url:
         return None
 
+    url = _blank_clickup_jws_client_id(url)
     decoded_url = unquote(url)
     if "\\" in url:
         return _oauth_url_payload_diagnostic(
