@@ -55,7 +55,7 @@ import { useAvailableModels } from '../hooks/useAvailableModels'
 import { effortToCarry, filterInteractiveModels, legacyCodexEffort, modelWithoutEffort, shouldSeparateModelEffort, switchGroupedModel, useModelPickerConfigured, useModelPickerHiddenModelsQuery } from '../hooks/useInteractiveModels'
 import { modelSupportsEffort, selectionCapabilitiesFailed } from '../lib/effort'
 import { isUnpinnedModel, JEV_ROUTE_MODEL, jevRouteOffered, jevRouteShownModel, withJevRoute } from '../lib/jevRoute'
-import { useQueuedMessageActions, queuedSendStash } from '../hooks/useQueuedMessageActions'
+import { useQueuedMessageActions, queuedSendStash, stashedImageIds } from '../hooks/useQueuedMessageActions'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useKirocrewConfigReader } from '../hooks/useKirocrewConfigReader'
 import { useImeGuard } from '../hooks/useImeGuard'
@@ -291,6 +291,10 @@ export default function ChatPane({
   const connectionsUiOn = useConnectionsUiEnabled()
   const [input, setInput] = useState('')
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
+  // The identity a cancelled queued send handed back for a picture, by chip
+  // path (`meta.image_ids`): a redacted path names no file, so the resend
+  // carries the identity instead. Read only for the pictures a turn sends.
+  const pendingImageIdsRef = useRef<Record<string, string>>({})
   const pendingDirs = useMemo(() => parseDirTokens(input).map(t => t.rel), [input])
   // Collapsed paste blocks behind the `[ Paste #N · M lines ]` tokens in
   // `input`: the Paste atom, carried to ChatInput by the Composer root below
@@ -1242,23 +1246,29 @@ export default function ChatPane({
     // never sent and attach files to a message they never composed.
     const files = optionText ? [] : pendingFiles
     const blocks = optionText ? [] : pasteBlocks
+    const imageIds = optionText ? {} : pendingImageIdsRef.current
+    // The pictures' identities, held for the same hand-backs as the chips:
+    // the clear below drops the live map.
+    const sentImageIds = optionText ? undefined : stashedImageIds(imageIds, files)
     if (!optionText) {
       setInput('')
       setPendingFiles([])
+      pendingImageIdsRef.current = {}
       setPasteBlocks([])
     }
     // The same turn ChatPage sends (`buildOutgoingTurn`, the one owner of the
     // order): every image a producer-form `![image](dest)` line on BOTH texts
-    // and every other file an `[attached_file N] path` marker on the wire with
-    // the ORDERED non-image list on `meta.files` (the agent's image extraction
-    // matches absolute paths in the PROMPT TEXT, and the bubble renders images
-    // only from their markdown); folder tokens as `[attached_dir N]`
+    // with the picture list on `meta.images` (the gateway builds the turn's
+    // image blocks from that list alone and never scans the prompt text for
+    // paths; the bubble renders images only from their markdown), and every
+    // other file an `[attached_file N] path` marker on the wire with the
+    // ORDERED non-image list on `meta.files`; folder tokens as `[attached_dir N]`
     // markers with `meta.dirs` (the pane has no project context, so tokens are
     // absolute and serialize as-is); the live paste tokens expanded on the wire
     // while the bubble keeps them plus `meta.pastes`, and the side table
     // re-collapses the server's expanded echo to that chip on history load; the
     // quoted message opening both texts.
-    const turn = buildOutgoingTurn({ text, files, pastes: blocks, quote: sentQuote }, 'send')
+    const turn = buildOutgoingTurn({ text, files, imageIds, pastes: blocks, quote: sentQuote }, 'send')
     const { wire: llm, bubble: displayTxt, pastes: bubblePastes } = turn
     storeSentPastes(turn.storedPaste)
     // sendId correlation (same contract as ChatPage): the wire text differs
@@ -1333,6 +1343,9 @@ export default function ChatPane({
           // The quote: back on the stage when this pane is still live and the
           // stage is free, else in the restored text (a rebound pane parks it).
           restoreIntoComposer(recoverQuoteInto(text, sentQuote, mountedRef.current && slotKey === slotKeyRef.current), files, bubblePastes, slotKey)
+          // The identities ride back with the chips they belong to, or the
+          // retry of a redacted picture goes out text-only.
+          if (sentImageIds && slotKey === slotKeyRef.current) Object.assign(pendingImageIdsRef.current, sentImageIds)
         },
         // Report ONLY -- the error row. The restore is `restore`'s job above;
         // handing the payload back here too would restore a `refused` twice.
@@ -1377,7 +1390,7 @@ export default function ChatPane({
         // conservative shape ChatPage's cancel restores through), so the token
         // string alone would be a dead chip that sends literally on retry —
         // the pasted text itself is the lossless form of what the user put in.
-        stashDemoted: (queueId) => { if (!optionText) queuedSendStash.set(queueId, { raw: bubblePastes.length ? expandPasteTokens(text, bubblePastes) : text, files, sent: llm, ...(sentQuote ? { quote: sentQuote } : {}) }) },
+        stashDemoted: (queueId) => { if (!optionText) queuedSendStash.set(queueId, { raw: bubblePastes.length ? expandPasteTokens(text, bubblePastes) : text, files, sent: llm, ...(sentQuote ? { quote: sentQuote } : {}), ...(sentImageIds ? { imageIds: sentImageIds } : {}) }) },
       })
       // -- doSend's send-machinery tail (not steer-receipt policy) --
       // Blocking ask resolution, owned by doSend and run on every accepted
@@ -1439,8 +1452,11 @@ export default function ChatPane({
     // The text-only steer turn: files inlined, the live paste tokens expanded
     // (ChatPage's steer shows the expanded text in its bubble too, so this one
     // does), the quote opening the text.
-    const turn = buildOutgoingTurn({ text: raw, files, pastes: pasteBlocks, quote: sentQuote }, 'steer')
+    const turn = buildOutgoingTurn({ text: raw, files, imageIds: pendingImageIdsRef.current, pastes: pasteBlocks, quote: sentQuote }, 'steer')
     const { wire: txt, pastes: steerPastes } = turn
+    // The pictures' identities, held for the same hand-backs as the chips:
+    // the clear below drops the live map.
+    const steerImageIds = stashedImageIds(pendingImageIdsRef.current, files)
     const sendId = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     // `meta.files` is the ORDERED non-image list the `[attached_file N]`
     // tokens index into: the transcript chip resolves marker N to
@@ -1461,6 +1477,7 @@ export default function ChatPane({
     // clear atomically.
     setInput('')
     setPendingFiles([])
+    pendingImageIdsRef.current = {}
     setPasteBlocks([])
     // `auto` hands the steer-or-queue choice to the gateway for this message
     // (`decisions/points/message_steer.py`); the receipt policy below is unchanged,
@@ -1477,7 +1494,12 @@ export default function ChatPane({
         echoReconciled: () => selectSendConfirmed(store.getState(), slotKey, sendId),
         // refused / response-late hand the payload back into this pane's
         // composer (raw text + files), addressed to the slot it was typed into.
-        restore: () => restoreIntoComposer(recoverQuoteInto(raw, sentQuote, mountedRef.current && slotKey === slotKeyRef.current), files, steerPastes, slotKey),
+        restore: () => {
+          restoreIntoComposer(recoverQuoteInto(raw, sentQuote, mountedRef.current && slotKey === slotKeyRef.current), files, steerPastes, slotKey)
+          // The identities ride back with the chips they belong to, or the
+          // retry of a redacted picture goes out text-only.
+          if (steerImageIds && slotKey === slotKeyRef.current) Object.assign(pendingImageIdsRef.current, steerImageIds)
+        },
         reportFailure: (reason, status) => reportSendFailure(reason, status),
         // \u26A0 is NoticeCard's warn-tone selector (parseNotice).
         warnUnconfirmed: () => dispatch(appendSlotMessage({ slot: slotKey, message: { role: 'notice', content: '\u26A0\uFE0F ' + i18nT('pages.chatPage.delivery_unconfirmed'), cls: '' } })),
@@ -1492,7 +1514,7 @@ export default function ChatPane({
         // chip gone (#560).
         // Expanded for the same reason as doSend's stash: no blocks travel
         // with the card, so the token alone would restore as a dead chip.
-        stashDemoted: (queueId) => queuedSendStash.set(queueId, { raw: steerPastes.length ? expandPasteTokens(raw, steerPastes) : raw, files, sent: txt, ...(sentQuote ? { quote: sentQuote } : {}) }),
+        stashDemoted: (queueId) => queuedSendStash.set(queueId, { raw: steerPastes.length ? expandPasteTokens(raw, steerPastes) : raw, files, sent: txt, ...(sentQuote ? { quote: sentQuote } : {}), ...(steerImageIds ? { imageIds: steerImageIds } : {}) }),
       })
       // Release a blocking card only once the gateway accepted the steer, so the agent is told to read a message that arrived.
       if (askAtSteer && (receipt.status === 'dispatched' || receipt.status === 'queued')) {
@@ -1669,7 +1691,10 @@ export default function ChatPane({
     // alias store -- restoreIntoComposer's own third parameter is its
     // paste-block list -- so the adapter pins the two-argument call and the
     // alias map is dropped here by construction rather than misread as pastes.
-    restoreDraft: (text, files, _aliases, quote) => restoreIntoComposer(recoverQuoteInto(text, quote ?? null), files),
+    restoreDraft: (text, files, _aliases, quote, imageIds) => {
+      if (imageIds) Object.assign(pendingImageIdsRef.current, imageIds)
+      restoreIntoComposer(recoverQuoteInto(text, quote ?? null), files)
+    },
   })
   // Split-view panes draw the SAME transcript rows as the single-chat surface,
   // through the SDK's row registry: the live ToolCallLine (purpose / input /

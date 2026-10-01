@@ -195,6 +195,65 @@ describe('useQueuedMessageActions — cancel', () => {
     expect(restoreDraft).toHaveBeenCalledWith('summarize the report', ['/tmp/report.docx'], undefined)
   })
 
+  it.each([
+    { name: 'listed', images: ['/tmp/private.png'], text: '', files: ['/tmp/private.png'] },
+    { name: 'missing', images: undefined, text: '![image](/tmp/private.png)', files: [] },
+    { name: 'empty', images: [], text: '![image](/tmp/private.png)', files: [] },
+    { name: 'unlisted', images: ['/tmp/other.png'], text: '![image](/tmp/private.png)', files: [] },
+    { name: 'malformed', images: ['/tmp/private.png', 42], text: '![image](/tmp/private.png)', files: [] },
+  ])('restores a typed image line as text unless structured images are valid and list it: $name', ({ images, text, files }) => {
+    const restoreDraft = vi.fn()
+    const row = queued('q1', '![image](/tmp/private.png)')
+    row.meta = { ...row.meta, ...(images === undefined ? {} : { images }) }
+    const { get } = renderActions({ rows: [row], restoreDraft })
+    act(() => { get().onCancel('q1') })
+    expect(restoreDraft).toHaveBeenCalledWith(text, files, undefined)
+  })
+
+  it('a parser-path cancel of a knowledge-prefixed send restores the picture behind the block', () => {
+    // The send wrote the knowledge block ahead of the picture line. Without a
+    // stash the parser is handed the block's extent by its owner, so the
+    // listed picture comes back as a chip and the block stays in the text.
+    const image = '/tmp/uploads/shot.png'
+    const kb = '[KNOWLEDGE CONTEXT — injected by user from knowledge library]\n\n## Doc\nkb text\n\n[END KNOWLEDGE CONTEXT]\n'
+    const restoreDraft = vi.fn()
+    const row = queued('q1', `${kb}\n![image](${image})\n\nwhat is this`)
+    row.meta = { ...row.meta, images: [image] }
+    const { get } = renderActions({ rows: [row], restoreDraft })
+    act(() => { get().onCancel('q1') })
+    expect(restoreDraft).toHaveBeenCalledWith(`${kb}\nwhat is this`, [image], undefined)
+  })
+
+  it('a parser-path cancel hands back the identity of each restored picture', () => {
+    // A redacted picture path names no file; the entry's `meta.image_ids`
+    // (one identity per picture, as the gateway recorded them) is what lets
+    // the resend recover the file, so the restore carries them keyed by the
+    // restored path and leaves out a picture whose identity is blank.
+    const redacted = '/tmp/uploads/[REDACTED: credential].png'
+    const plain = '/tmp/shots/b.png'
+    const restoreDraft = vi.fn()
+    const row = queued('q1', `![image](${redacted})\n![image](${plain})\n\nlook`)
+    row.meta = { ...row.meta, images: [redacted, plain], image_ids: ['1234:567:89abcdef01234567', ''] }
+    const { get } = renderActions({ rows: [row], restoreDraft })
+    act(() => { get().onCancel('q1') })
+    expect(restoreDraft).toHaveBeenCalledWith('look', [redacted, plain], undefined, undefined, { [redacted]: '1234:567:89abcdef01234567' })
+  })
+
+  it('a stash hit hands back the identities the send stashed beside its files', () => {
+    // A resend of a restored, redacted picture goes through the stash when it
+    // is cancelled again; the record carries the identities the composer held
+    // at send time, or the picture is restored as a path that names no file.
+    const redacted = '/tmp/uploads/[REDACTED: credential].png'
+    const restoreDraft = vi.fn()
+    const sent = `![image](${redacted})\n\nlook`
+    const row = queued('q1', sent)
+    row.meta = { ...row.meta, images: [redacted], image_ids: ['1234:567:89abcdef01234567'] }
+    const { get } = renderActions({ rows: [row], restoreDraft })
+    queuedSendStash.set('q1', { raw: 'look', files: [redacted], sent, imageIds: { [redacted]: '1234:567:89abcdef01234567' } })
+    act(() => { get().onCancel('q1') })
+    expect(restoreDraft).toHaveBeenCalledWith('look', [redacted], undefined, undefined, { [redacted]: '1234:567:89abcdef01234567' })
+  })
+
   it('a foreign card carrying the entry\'s attachment list restores a spaced path whole', () => {
     // After a reload (or on another tab) there is no stash, but the row's
     // `meta.files` is the server's echo of the entry's own list — so the
