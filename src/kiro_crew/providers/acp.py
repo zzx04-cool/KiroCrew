@@ -9,7 +9,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any, AsyncContextManager, cast
 
@@ -18,7 +18,7 @@ from kiro_crew.acp.chat_runtime_sharing import (
     ChatRuntimeKey,
     agent_spec_generation,
     chat_runtime_cap,
-    eligible_for_chat_sharing,
+    chat_sharing_ineligible_reason,
 )
 from kiro_crew.acp.client import (
     DEFAULT_MODEL,
@@ -520,6 +520,12 @@ class AcpProvider(LLMProvider):
         if agent:
             kwargs["agent"] = agent
         self.member_context = member_context
+        # WHICH member this session runs as, written by the allocator immediately
+        # before ``start()`` from the execution record it already reads there --
+        # like the account era below, and for the same reason: the chat-runtime key
+        # needs it, and no spawn parameter carries it because the harness does not.
+        # Empty for a session that is not a member's.
+        self.member_id: str = ""
         self.memory_mode = memory_mode
         # Kept on the provider, not only on the placeholder client: on the kiro
         # path ``_start_kiro_runtime_impl`` replaces that client with an
@@ -1260,6 +1266,7 @@ class AcpProvider(LLMProvider):
                 member_session_key=member_session_key,
                 session_key=session_key,
                 channel_id=channel_id,
+                crew_agent=crew_agent,
                 skip_projection_refresh=skip_projection_refresh,
             )
 
@@ -1403,25 +1410,35 @@ class AcpProvider(LLMProvider):
         chat_share_enabled = False
         chat_share_configured_cap = CHAT_RUNTIME_CAP
         chat_share_spec_generation = ""
+        chat_share_sandbox_tier: str = sandbox_mode
         try:
             # Deferred: the config loader imports this provider module, so a
             # module-scope import here would close that cycle.
             from kiro_crew.config.loader import KiroCrewConfig
+            from kiro_crew.sandbox import effective_sandbox_mode
 
-            def _read_chat_share_inputs() -> tuple[object, str]:
-                """The two blocking reads the placement needs, in ONE off-loop hop.
+            def _read_chat_share_inputs() -> tuple[object, str, str]:
+                """The blocking reads the placement needs, in ONE off-loop hop.
 
                 A config cache miss stats, reads and validates; the spec
-                generation stats two directories. Either on the event loop would
-                stall every task on it, not just this start, and two hops cost
-                two context switches for values consumed together.
+                generation stats two directories; the effective sandbox tier
+                resolves the governed ``sandbox.min_level`` floor (a potential
+                profile walk). Any of them on the event loop would stall every
+                task on it, not just this start, and separate hops cost a context
+                switch each for values consumed together.
                 """
                 cfg = KiroCrewConfig.load().agent
-                return cfg, agent_spec_generation(work_dir, agent or "kirocrew")
+                return (
+                    cfg,
+                    agent_spec_generation(work_dir, agent or "kirocrew"),
+                    effective_sandbox_mode(sandbox_mode),
+                )
 
-            chat_agent_cfg, chat_share_spec_generation = await asyncio.to_thread(
-                _read_chat_share_inputs
-            )
+            (
+                chat_agent_cfg,
+                chat_share_spec_generation,
+                chat_share_sandbox_tier,
+            ) = await asyncio.to_thread(_read_chat_share_inputs)
             chat_share_enabled = bool(getattr(chat_agent_cfg, "chat_runtime_sharing", False))
             chat_share_configured_cap = int(
                 getattr(chat_agent_cfg, "chat_runtime_sharing_max_sessions", CHAT_RUNTIME_CAP)
@@ -1477,12 +1494,23 @@ class AcpProvider(LLMProvider):
         # the founder's own spawn matches its (identity-object) key.
         from kiro_crew.sandbox import _forward_ssh_auth_sock
 
-        chat_share_forward_ssh = await asyncio.to_thread(_forward_ssh_auth_sock)
+        chat_share_forward_ssh = await asyncio.to_thread(
+            _forward_ssh_auth_sock,
+            sandbox_mode,
+            tuple(getattr(self._client, "_sandbox_hidden_dirs", ())),
+        )
         # This start's own lease, filled once a runtime is acquired, and handed to
         # the provider below so there is ONE release implementation -- the
         # provider's own, which every teardown path already calls.
         chat_share_lease: str | None = None
         chat_share_key: ChatRuntimeKey | None = None
+        # Whether the key above can still match another session's. It stops being
+        # true when placement gives up and swaps a unique token into the key to
+        # found this session its own process: nothing can join such a key and it
+        # can join nothing, so the frozen spawn inputs it carries are matched by
+        # no one and the SSH_AUTH_SOCK-forwarding consent is read fresh at spawn
+        # instead, exactly as it is for a session that never built a key.
+        chat_share_key_joinable = True
         # True only for a session that landed on a process ANOTHER session
         # founded. It decides the two things that differ for a joiner: whether
         # this provider may kill the process, and whether per-session start work
@@ -1501,11 +1529,16 @@ class AcpProvider(LLMProvider):
             return ChatRuntimeKey.build(
                 work_dir=work_dir,
                 agent=agent or "kirocrew",
-                sandbox_mode=sandbox_mode,
+                # The tier wrap_argv would ACTUALLY apply (the governed
+                # sandbox.min_level floor already clamped in), NOT the raw
+                # configured mode. Keying the raw mode would let a chat join a
+                # process founded under a LOWER tier after an operator raised the
+                # floor, inheriting a namespace the raised floor forbids. Re-read
+                # and re-confirmed after acquisition like the era and the spec.
+                sandbox_mode=chat_share_sandbox_tier,
                 extra_env=extra_env,
                 acp_backend=self._client.backend,
                 tool_search=self._tool_search_settings(),
-                member_context=self.member_context,
                 memory_mode=self.memory_mode,
                 shared_scratch=self._shared_scratch,
                 mcp_gateway_overlay=mcp_gateway_overlay,
@@ -1539,14 +1572,28 @@ class AcpProvider(LLMProvider):
                 forward_ssh_auth_sock=chat_share_forward_ssh,
             )
 
-        if eligible_for_chat_sharing(
+        chat_share_refusal = chat_sharing_ineligible_reason(
             session_key=chat_share_session_key,
             memory_mode=self.memory_mode,
-            member_context=self.member_context,
             sharing_enabled=chat_share_enabled,
             backend=self._client.backend,
-        ):
+            member_context=self.member_context,
+        )
+        if not chat_share_refusal:
             chat_share_key = _build_chat_share_key()
+        elif chat_share_enabled:
+            # One line per refused placement, at WARNING, because the operator who
+            # turned sharing ON is the one who needs it: the symptom of a refusal
+            # is a process count that did not fall, and the branch name is the only
+            # thing that distinguishes the four reasons. Logged ONLY while sharing
+            # is enabled -- with the switch off every start would refuse for the
+            # same reason and the line would be pure noise. The branch name and the
+            # session key, and nothing else: no path, no environment value.
+            logger.warning(
+                "chat-runtime-sharing ineligible reason=%s session=%s",
+                chat_share_refusal,
+                chat_share_session_key,
+            )
 
         async def _place_chat_runtime() -> Acquisition:
             """Take a lease, then CONFIRM the placement against the spec, account, and consent.
@@ -1584,7 +1631,8 @@ class AcpProvider(LLMProvider):
             """
             nonlocal chat_share_key, chat_share_spec_generation
             nonlocal chat_share_pre_spawn_era, chat_share_identity
-            nonlocal chat_share_forward_ssh
+            nonlocal chat_share_forward_ssh, chat_share_key_joinable
+            nonlocal chat_share_sandbox_tier
             assert chat_share_key is not None
             for _ in range(_CHAT_SHARE_PLACEMENT_ATTEMPTS):
                 placed = await RUNTIME_OWNERSHIP.acquire(
@@ -1632,7 +1680,23 @@ class AcpProvider(LLMProvider):
                     # older preference. Symmetric with the era and generation: in
                     # the key at build time AND re-confirmed here, or a joiner
                     # bypasses an opt-out that landed after its own pre-read.
-                    confirmed_forward_ssh = await asyncio.to_thread(_forward_ssh_auth_sock)
+                    confirmed_forward_ssh = await asyncio.to_thread(
+                        _forward_ssh_auth_sock,
+                        sandbox_mode,
+                        tuple(getattr(self._client, "_sandbox_hidden_dirs", ())),
+                    )
+                    # Re-read the governed sandbox tier on the same bracket. The
+                    # ``sandbox.min_level`` floor is a GOVERNANCE ceiling raised
+                    # out of band; a joiner landing on a process founded under a
+                    # lower tier inherits a namespace the raised floor forbids
+                    # (e.g. a cc floor's ``.kube`` mask). Symmetric with the era
+                    # and the consent: keyed at build time AND re-confirmed here,
+                    # or a floor raised during the acquisition wait is bypassed.
+                    from kiro_crew.sandbox import effective_sandbox_mode
+
+                    confirmed_sandbox_tier = await asyncio.to_thread(
+                        effective_sandbox_mode, sandbox_mode
+                    )
                 except BaseException:
                     # Guarantee the release SETTLES even if the wait is cancelled
                     # again: run it as a task and loop over a shield, so a second
@@ -1663,9 +1727,100 @@ class AcpProvider(LLMProvider):
                 # rebuilds the key -- where an empty era becomes a unique token that
                 # founds this session its own process rather than joining one it
                 # could not confirm.
-                era_holds = bool(confirmed_era) and confirmed_era == chat_share_pre_spawn_era
+                #
+                # When the PRE-READ era was itself empty the comparison is skipped:
+                # the key already carries a unique ``unverified-`` token, so no join
+                # was ever possible and this acquisition founded its own process.
+                # Demanding a nonempty re-read there would reject every round on a
+                # host whose identity read is always empty (an env-relocated store,
+                # no vault, no definitive API key), spawning and killing a process
+                # each round before founding one anyway.
+                era_holds = (not chat_share_pre_spawn_era) or (
+                    bool(confirmed_era) and confirmed_era == chat_share_pre_spawn_era
+                )
                 forward_ssh_holds = confirmed_forward_ssh == chat_share_forward_ssh
-                if confirmed == chat_share_spec_generation and era_holds and forward_ssh_holds:
+                sandbox_tier_holds = confirmed_sandbox_tier == chat_share_sandbox_tier
+                if (
+                    confirmed == chat_share_spec_generation
+                    and era_holds
+                    and forward_ssh_holds
+                    and sandbox_tier_holds
+                ):
+                    # Fork-governance admission. ``_spawn_chat_runtime`` runs this
+                    # gate inside ``spawn()`` (see the harness spawn path), so a
+                    # FOUNDER (``joined`` False) is already admitted. A JOINER lands
+                    # on a live runtime WITHOUT spawning, so it never passed the
+                    # gate: a fork whose refresh failed leaves the spec bytes --
+                    # and so the share key -- unchanged, which is exactly when a
+                    # joiner matches and would otherwise attach to a runtime running
+                    # grants the admission gate rejects. Run the SAME check the
+                    # spawn path uses, off the loop, and fail closed to the SAME
+                    # refusal: a joiner that cannot be admitted must not attach, so
+                    # release the lease and raise rather than return ``placed``.
+                    if placed.joined:
+                        from kiro_crew.agent import (
+                            ForkGovernanceUnresolved,
+                            require_fork_governance,
+                        )
+
+                        try:
+                            await asyncio.to_thread(
+                                require_fork_governance, agent or "kirocrew", work_dir
+                            )
+                        except ForkGovernanceUnresolved as exc:
+                            # A joiner never holds the only lease (the founder's
+                            # keeps the runtime alive), so this release is not a
+                            # last release and hands back nothing; the defensive
+                            # kill mirrors the mismatch path for the impossible case.
+                            stranded = await RUNTIME_OWNERSHIP.release(placed.lease)
+                            if stranded is not None:
+                                await cast(AcpRuntime, stranded).kill(
+                                    expected=True,
+                                    reason=(
+                                        "chat runtime sharing: fork governance " "refused the join"
+                                    ),
+                                )
+                            raise AcpRuntimeError(str(exc)) from exc
+                        except BaseException:
+                            # ``require_fork_governance`` blocks on the fork
+                            # refresh wait for up to ``_FORK_REFRESH_WAIT_SECS``,
+                            # the longest await in this bracket, so a cancellation
+                            # (a restart timeout, a slot deletion) reaches here
+                            # with ``placed.lease`` outstanding. Release it the
+                            # same way the confirmation bracket above does, or the
+                            # joiner's lease is stranded and the founder's last
+                            # release returns ``None`` -- the runtime process is
+                            # never handed back to be killed. ``BaseException``
+                            # (not ``Exception``) because ``CancelledError`` is
+                            # what actually reaches here; the release runs as a
+                            # task under a shield loop so a second cancellation
+                            # cannot strand the lease the first was unwinding, and
+                            # any runtime it hands back is killed before the
+                            # cancellation propagates.
+                            release_task = asyncio.ensure_future(
+                                RUNTIME_OWNERSHIP.release(placed.lease)
+                            )
+                            while not release_task.done():
+                                try:
+                                    await asyncio.shield(release_task)
+                                except asyncio.CancelledError:
+                                    continue
+                            stranded = release_task.result()
+                            if stranded is not None:
+                                try:
+                                    await cast(AcpRuntime, stranded).kill(
+                                        expected=True,
+                                        reason=(
+                                            "chat runtime sharing: join cancelled "
+                                            "inside fork governance"
+                                        ),
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "chat runtime sharing: stranded-runtime kill failed",
+                                        exc_info=True,
+                                    )
+                            raise
                     return placed
                 if confirmed != chat_share_spec_generation:
                     logger.info(
@@ -1676,6 +1831,11 @@ class AcpProvider(LLMProvider):
                     logger.info(
                         "chat runtime sharing: the account era moved during placement; "
                         "releasing and retrying on the fresh identity"
+                    )
+                elif not sandbox_tier_holds:
+                    logger.info(
+                        "chat runtime sharing: the governed sandbox tier moved during "
+                        "placement; releasing and retrying on the fresh tier"
                     )
                 else:
                     logger.info(
@@ -1699,12 +1859,21 @@ class AcpProvider(LLMProvider):
                 # The fresh consent this round re-read, so the rebuilt key carries
                 # the preference the retry will spawn under.
                 chat_share_forward_ssh = confirmed_forward_ssh
+                # Likewise the fresh governed tier, so a retry after a raised floor
+                # keys (and spawns) at the tier wrap_argv will actually apply.
+                chat_share_sandbox_tier = confirmed_sandbox_tier
                 chat_share_key = _build_chat_share_key()
             # The spec or the account era is still moving. Treated as unobservable
             # rather than retried forever: a key that cannot match anything founds
             # this session its own process, which is the same answer
             # ``agent_spec_generation`` gives when it cannot observe a file at all.
             chat_share_spec_generation = f"unsettled-{uuid.uuid4().hex}"
+            # The token above makes the key unique, so this last acquisition can
+            # only MISS and found a process of its own. Nothing matches the frozen
+            # forwarding consent it carries, so the spawn below reads the consent
+            # as it stands then -- an operator who revoked ssh-agent forwarding
+            # during these placements does not get a child holding it anyway.
+            chat_share_key_joinable = False
             chat_share_key = _build_chat_share_key()
             logger.warning(
                 "chat runtime sharing: the agent spec, account era, or forwarding consent "
@@ -1745,7 +1914,22 @@ class AcpProvider(LLMProvider):
                 # The consent frozen at placement and keyed on above, so the
                 # process forwards exactly what its key promised rather than
                 # re-reading a consent that may have toggled since.
-                forward_ssh_auth_sock=chat_share_forward_ssh,
+                #
+                # Passed ONLY on a key another session can match. Without such a
+                # key there is nothing for the frozen value to match, so handing it
+                # over would trade the fresh read inside spawn() for a staler one
+                # and buy nothing: an operator who revokes ssh-agent forwarding
+                # after this start's early read would still see the new process
+                # receive the agent socket, for the whole life of a process that
+                # cannot shed it. That covers a session with no key at all and one
+                # whose key was made unique after placement gave up.
+                # ``None`` means "resolve it at spawn", which is what every
+                # such caller wants.
+                forward_ssh_auth_sock=(
+                    chat_share_forward_ssh
+                    if chat_share_key is not None and chat_share_key_joinable
+                    else None
+                ),
             )
             try:
                 await fresh.spawn(
@@ -1818,6 +2002,20 @@ class AcpProvider(LLMProvider):
                 meta["chat_runtime_shared"] = True
                 meta["chat_runtime_joined"] = joined_shared_runtime
                 meta["chat_runtime_leases"] = acquisition.leases_on_runtime
+                # The other half of the placement record: one line saying where
+                # this session landed and how many sessions that process now
+                # serves. At WARNING for the same reason the refusal is -- an
+                # operator counting processes needs the two readings side by side,
+                # and INFO is below the level a running gateway keeps. The pid and
+                # the tenant count are the whole payload; the key itself is not
+                # logged, since it carries paths and environment values.
+                logger.warning(
+                    "chat-runtime-sharing %s runtime=%s tenants=%d session=%s",
+                    "joined" if joined_shared_runtime else "spawned",
+                    runtime.pid,
+                    acquisition.leases_on_runtime,
+                    chat_share_session_key,
+                )
             else:
                 runtime = await _spawn_chat_runtime()
         finally:
@@ -3432,6 +3630,27 @@ class AcpProvider(LLMProvider):
         """
         probe = getattr(self._client, "turn_finished_cleanly", None)
         return bool(probe()) if callable(probe) else False
+
+    @asynccontextmanager
+    async def hold_chat_turn_gate(self) -> "AsyncIterator[None]":
+        """Hold the shared process's chat turn gate across a whole compaction.
+
+        The compaction coordinator wraps ``stream_command('/compact')`` plus the
+        deferred ``wait_for_compaction`` receipt in this so the gate is held
+        CONTINUOUSLY across both — closing the window where a co-tenant could
+        start a turn into which this session's ownerless compaction terminal is
+        broadcast, clearing the co-tenant's already-streamed answer. Delegates to
+        the backing ``AcpSessionProvider`` (which owns the gate); a placeholder
+        client before kiro startup, or a non-kiro client, has no gate, so this
+        is a null context there and the prior behaviour stands.
+        """
+        hold = getattr(self._client, "hold_chat_turn_gate", None)
+        if hold is None:
+            async with nullcontext():
+                yield
+            return
+        async with hold():
+            yield
 
     async def wait_for_compaction(self, timeout: float = COMPACT_WAIT_TIMEOUT_SECS) -> dict:
         """Wait for compaction completed/failed after stream ends.
