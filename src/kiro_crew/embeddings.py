@@ -1954,6 +1954,13 @@ class EmbeddingBackend(abc.ABC):
     def is_ready(self) -> bool:
         """True when the backend can produce vectors right now (model loaded)."""
 
+    def prefetch(self) -> None:
+        """Start loading the model if an embed is about to need it. Never blocks.
+
+        A hint, not a request: the default does nothing, and an implementation
+        must not change what a later ``embed`` returns, only when it can start.
+        """
+
     @abc.abstractmethod
     def embed(self, text: str, *, priority: int = PRIORITY_NORMAL) -> "list[float] | None":
         """Embed one text, or None when unavailable.
@@ -2108,6 +2115,19 @@ class LlamaCppEmbedder(EmbeddingBackend):
         out can never be compared against un-reconciled old-model vectors.
         """
         self._serving = True
+
+    def prefetch(self) -> None:
+        """Kick the background load an ``embed`` would kick, a little earlier.
+
+        Same gates as ``embed``: nothing when closed or not serving (a candidate
+        mid-swap), and ``_kick_background_load`` keeps its own (already loaded,
+        loading, failed-load cooldown, file missing, protected path). So a load
+        that would fail or never start behaves exactly as before; one that
+        succeeds is published exactly as an embed-triggered load is.
+        """
+        if self._closed or not self._serving or self._llm is not None:
+            return
+        self._kick_background_load()
 
     def _kick_background_load(self) -> None:
         """Start loading the model on a daemon thread. Idempotent, returns fast.
