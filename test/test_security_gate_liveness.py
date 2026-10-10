@@ -256,7 +256,23 @@ def _url_payload_command(n: int) -> str:
 #: data-consumer exemption. The branch grows a ``(?<!^-)`` guard and its comment states
 #: which terminal ``e`` is the command. Every execute construct it read before is still
 #: read; no other pattern moved.
-_PACKAGE_LINE_BUDGET = 28_864
+#:
+#: Raised again, from 28,864, for the remote-command ``-R`` fix: a single-field
+#: reverse-SOCKS value is a self dial unless it PROVABLY cannot be a port
+#: (``_might_be_forward_port`` fails closed -- only a literal ``/``-bearing token
+#: with no shell metacharacter is a non-forward value, since OpenSSH takes ``0``
+#: and service names and the shell expands braces/globs/variables/``${p%/}`` to a
+#: port). A TWO-field value always fails closed (its last field can be a local
+#: socket path, a real reverse forward in). The exemption is trusted ONLY for an
+#: ssh at program position with no expansion, alias or newline on the line, so a
+#: launcher-run ssh (``xargs -I word ssh …``) and a same-line ``alias``-rewritten
+#: argv (``alias gh=`` dropping the word the walk reads as the remote command)
+#: both fail closed. So ``gh ... -R owner/repo`` is allowed while
+#: ``-R 2222:localhost:22``, ``-R 0``, ``-R 2222:/run/docker.sock``, the launcher
+#: forms and the alias form fail closed. ``mksh`` stays in the nested-shell set,
+#: so a self dial through ``mksh -c`` is caught while a non-self far host is
+#: allowed, exactly as under ``bash``/``ksh``.
+_PACKAGE_LINE_BUDGET = 28_947
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

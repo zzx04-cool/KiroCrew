@@ -404,7 +404,48 @@ def _glob_to_regex(pattern: str, depth: int = 0, budget: "list[int] | None" = No
 
 # Programs whose ``-c`` argument is a shell script: its text is a COMMAND, so a
 # self-protection check has to look inside it rather than treat it as an operand.
-_NESTED_SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"})
+_NESTED_SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "busybox"})
+
+
+# Any of these in the ORIGINAL command text means the shell can rewrite a word
+# before exec (substitution, variable, glob, brace, extglob, process-sub), so a
+# token's POSITION in the normalized walk is not the position ssh receives. A
+# caller that trusts position -- the ssh ``-R`` remote-command path exemption --
+# must fail closed when this is present.  A shell ALIAS also rewrites argv: an
+# alias expanded on a later line turns a word the walk reads as the remote
+# command into a real option (``ssh far gh -R tmp/s`` with ``alias gh=`` runs
+# ``ssh far -R tmp/s``, a real reverse forward in), so an ``alias`` word and a
+# newline (an alias takes effect on the line after it is defined) are unsafe too.
+_POSITION_UNSAFE_RE = re.compile(r"[$`{}()*?\[\]~<>\n]|\balias\b")
+
+
+def _text_defeats_argv_position(text_lower: str) -> bool:
+    """True if an expansion/glob/alias/newline could shift argv so position is unsafe."""
+    return bool(_POSITION_UNSAFE_RE.search(text_lower))
+
+
+# A LITERAL path/repo token: a ``/``-bearing word drawn ONLY from path characters
+# -- an ALLOWLIST, so no shell operator (extglob ``(`` / ``|`` / ``@``, ``$``,
+# brace, glob) can slip through. Used both for the ssh ``-R`` path value and to
+# recognise a literal ssh destination / remote-command word.
+_LITERAL_PATH_RE = re.compile(r"\A[a-z0-9][a-z0-9/._-]*\Z")
+
+
+def _might_be_forward_port(field: str, post_destination: bool) -> bool:
+    """True unless a single ``-R`` port field PROVABLY cannot be a port.
+
+    Fails closed: a number, ``0``, a service name, or any token the shell could
+    expand to a port (brace, glob, extglob, variable, tilde, command sub) counts
+    as a port. A ``/``-bearing token drawn solely from literal path characters is
+    exempt as a non-forward value ONLY when *post_destination* -- after the remote
+    command begins it is a command's own flag (``gh -R o/r``); before it a ``-R``
+    is a real option whose ``/`` value OpenSSH reads as a local SOCKET PATH (a
+    reverse forward in), so it fails closed.
+    """
+    tok = field.strip().strip("\"'[]")
+    if post_destination and "/" in tok and _LITERAL_PATH_RE.match(tok):
+        return False
+    return True
 
 
 _NESTED_SHELL_VERBS = frozenset({"eval", "source", "."})
