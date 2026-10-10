@@ -1728,6 +1728,14 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # change it, so a zero-click fetch never carries what redaction removes.
         # Nothing it returns is redacted text, so it is a gate, not an egress sink.
         "dashboard/handlers/link_meta.py",
+        # Gate-side: `dashboard_save`'s `_credential_shaped_names` asks whether a
+        # package's declared field names or view block ids WOULD be changed by the
+        # redactor and refuses the save (`unsafe_declared_name`) when any would. It
+        # is a yes/no predicate, not a rewrite: the offending name is never emitted
+        # (the refusal reports a POSITION, not the name), so nothing redacted leaves
+        # here. The surfaces that show a crewmate's published panel are the
+        # top-level `agent_panel.py` sink, not this write route.
+        "dashboard/handlers/agent_panel.py",
         # Drives the backup redaction pass and reports what it did, but applies no
         # redactor itself: the outbound bytes are rewritten in `snapshot_redact.py`,
         # which is the registered sink. What matches the call-site scan here are the
