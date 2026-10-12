@@ -1803,6 +1803,7 @@ class TestAdvertisedSet:
             "session_set_model",
             "session_reload",
             "session_rename",
+            "session_generate_title",
             "session_close",
             "session_revive",
             "session_send",
