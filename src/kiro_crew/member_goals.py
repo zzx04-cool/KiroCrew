@@ -447,8 +447,8 @@ def set_long_term(
     """Replace the long-term goal. Returns ``{"before", "after", "record"}``.
 
     *expected* is a compare-and-set: the write is refused (``changed_meanwhile``)
-    when the stored goal is no longer that text, so a card's Apply or Undo never
-    overwrites a newer edit. Clearing the goal also turns the reminder off, since
+    when the stored goal differs from that text, so a card's Apply or Undo never
+    overwrites a newer edit. Clearing the goal also turns every check-in off, since
     a crewmate with no goal has nothing to be reminded of.
     """
     clean = _clean_text(text, max_chars=LONG_TERM_MAX_CHARS, multiline=True, what="the goal")
@@ -511,7 +511,7 @@ def set_key_results(slug: str, member: str, items: Any, *, expected: Any = None)
 
     *expected* is the ``{text, target}`` list (:func:`key_result_shape`) of the
     set this write replaces; the write is refused (``changed_meanwhile``) when the
-    stored set no longer has that shape, so a card never overwrites a newer edit.
+    stored set has another shape, so a card never overwrites a newer edit.
     A key result kept with the same text and target keeps its id and reading.
     """
     clean = _clean_kr_items(items)
