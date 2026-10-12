@@ -70,6 +70,17 @@ vi.mock('../../api/client', () => ({
     // the crewmate's dynamic dashboard, mocked out below), but other surfaces on
     // this page still open it, and an unstubbed read rejects into a red alert.
     memberPanel: vi.fn(() => Promise.resolve({ panel: null, html: null })),
+    // The goal record behind the Dashboard tab's summary and the Profile
+    // card's About. "No goal yet" is the state every case here wants: a failed
+    // read now says so in an alert rather than rendering nothing.
+    memberGoals: {
+      get: vi.fn(() => Promise.resolve({
+        slug: '', member: '', long_term: '', long_term_updated_at: null, long_term_updated_by: null,
+        key_results: [], short_term: [], reports: [], last_crewmate_change: null, removed_key_result: null,
+        schedules: { time: '09:00', timezone: '', daily: false, weekly: false, weekday: 1, monthly: false, month_day: 1 },
+        limits: { long_term_max_chars: 2000, short_text_max_chars: 300, max_short_term: 20, max_key_results: 3, key_result_text_max_chars: 200, key_result_value_max_chars: 40 },
+      })),
+    },
     // The panel's session-status frame reads the crewmate's automatic dashboard
     // card. "Waiting, nothing published" is the state every case here is about;
     // an unstubbed read rejects and the frame raises the same red alert, which
@@ -6547,7 +6558,7 @@ describe('MembersPage warm greeting (a return in the middle of a goal)', () => {
     vi.mocked(api.crewBoard).mockRejectedValue(Object.assign(new Error('ledger needs repair'), { status: 409 }))
     await renderPage([row()])
     fireEvent.click(await rosterRow('oncall'))
-    expect(await screen.findByTestId('member-resume-error', undefined, PANE_READY)).toHaveTextContent("Could not read where oncall's goal stands.")
+    expect(await screen.findByTestId('member-resume-error', undefined, PANE_READY)).toHaveTextContent("Could not read where oncall's task stands.")
     expect(screen.queryByTestId('member-resume-card')).toBeNull()
   })
 

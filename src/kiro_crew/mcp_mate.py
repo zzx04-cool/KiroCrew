@@ -9,13 +9,25 @@ tiers that follow who owns the field:
   nothing waits on a card. Only when the user has just asked for the change:
   the tool description says so, and the gateway admits only a turn the user
   sent (:mod:`kiro_crew.dashboard.handlers.member_self`).
+* **Goals** -- ``goal_read``, ``key_result_progress``, ``short_goal_add``,
+  ``short_goal_update`` and ``save_goal_report`` read the goal, record key-result
+  readings, file a weekly or monthly report, and change the crewmate's
+  short-term goals at once, with no card: they are its
+  own working plan, every change records who made it, and the user can undo the
+  newest one from the Goals tab. Admitted on any turn in the crewmate's own
+  dashboard thread, including the Daily Goal Reminder's hidden turn
+  (:mod:`kiro_crew.dashboard.handlers.member_goals`).
 * **Card-backed** -- ``set_model``, ``set_approval_mode``,
-  ``request_capabilities``: what the crewmate runs on and what it may do
+  ``request_capabilities``, ``set_goal`` (the long-term goal), ``set_key_results``
+  (how the goal is measured, the whole set at once): what the crewmate
+  works toward, runs on and what it may do
   without asking. These are the user's to grant, so each becomes the
   existing change card (:mod:`kiro_crew.dashboard.change_cards`) for the caller's
   own member, and nothing changes until the user presses it. The crewmate names
   the ask; the gateway fixes the kind and the member. The outcome reaches the
-  crewmate on its next turn, the way every card outcome does.
+  crewmate on its next turn, the way every card outcome does. They need a turn
+  the user sent, except that the gateway's own Monthly review of this crewmate
+  may raise ``set_goal`` and ``set_key_results``.
 
 Why its own server
 ------------------
@@ -206,6 +218,142 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
+        {
+            "name": "goal_read",
+            "description": (
+                "Read your goal: the long-term goal the user set and your short-term "
+                "goals toward it, each with its id, status (open, done, dropped) and who "
+                "changed it last. Your open goals are also in your context at session "
+                "start; call this when you need the done ones or fresh state."
+            ),
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "set_goal",
+            "description": (
+                "Ask the user to set your long-term goal: what you work toward. Use it "
+                "when the user has told you the goal, or agreed to a new one, in their "
+                "own words, or when your Monthly review finds the goal no longer fits "
+                "the work; pass it as one plain paragraph. " + _CARD_NOTE
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "long_term": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "reason": {"type": "string", "maxLength": 500},
+                },
+                "required": ["long_term"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "set_key_results",
+            "description": (
+                "Ask the user to confirm your key results: one to three readings that "
+                "show how far you are from your long-term goal, replacing the current "
+                "set. Work them out yourself first: look into the work (the repo, the "
+                "queue, past releases you can read) and pick things you can check and "
+                "report as a number or a plain yes/no; target is that number or word. "
+                "When the goal cannot be measured, propose none and say so instead of "
+                "inventing a number. Propose a new set when the long-term goal changes. "
+                + _CARD_NOTE
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "target": {"type": "string", "minLength": 1, "maxLength": 40},
+                            },
+                            "required": ["text", "target"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "reason": {"type": "string", "maxLength": 500},
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "key_result_progress",
+            "description": (
+                "Record a fresh reading for one key result by its id: current is what you "
+                "measured, in the same form as its target (a number or a word). Saved at "
+                "once, with no sign-off, and shown on your Goals tab. Record one whenever "
+                "you check."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "maxLength": 16},
+                    "current": {"type": "string", "minLength": 1, "maxLength": 40},
+                },
+                "required": ["id", "current"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "save_goal_report",
+            "description": (
+                "Save your weekly report or monthly review as a report the user can "
+                "open: kind weekly or monthly, a short title, and the report in "
+                "Markdown. It is filed under Crewmates/<your name>/Reports and the user "
+                "gets a notification linking it. After saving, reply in the chat with "
+                "one short line that points at it; the report itself stays out of the "
+                "chat."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["weekly", "monthly"]},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "markdown": {"type": "string", "minLength": 1, "maxLength": 40000},
+                },
+                "required": ["kind", "title", "markdown"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "short_goal_add",
+            "description": (
+                "Add one short-term goal: a step you are taking now toward your long-term "
+                "goal, in a short line. It is saved at once and shows on your Goals tab, "
+                "where the user can edit or undo it. Add one when you are confident it is "
+                "the next step; no need to ask first."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 300}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "short_goal_update",
+            "description": (
+                "Change one short-term goal by its id: status done when it is finished, "
+                "dropped when it no longer applies, open to reopen it; or text to reword "
+                "it. Saved at once, shown on your Goals tab, and undoable there by the "
+                "user. When a task you finish completes a short-term goal, check it off."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "maxLength": 16},
+                    "status": {"type": "string", "enum": ["open", "done", "dropped"]},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 300},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
     ]
 
 
@@ -280,7 +428,66 @@ _PROPOSALS = {
     "set_model": "model",
     "set_approval_mode": "approval_mode",
     "request_capabilities": "capabilities",
+    "set_goal": "goal",
+    "set_key_results": "key_results",
 }
+
+
+def _goal_call(name: str, args: dict[str, Any], sk: str) -> str:
+    """``goal_read`` / ``short_goal_add`` / ``short_goal_update``: direct, no card."""
+    if name == "goal_read":
+        d = _post("/api/member/self/goals/read", {}, session_key=sk)
+        refused = _error_for(name, d)
+        return refused or _render(d)
+    if name == "key_result_progress":
+        d = _post(
+            "/api/member/self/goals/key-result",
+            {"id": args.get("id", ""), "current": args.get("current", "")},
+            session_key=sk,
+        )
+        refused = _error_for(name, d)
+        if refused:
+            return f"{refused}\nThe reading was not saved; do not say it was."
+        return _render({**d, "next": "Saved; it shows on your Goals tab."})
+    if name == "save_goal_report":
+        d = _post(
+            "/api/member/self/goals/report",
+            {k: args.get(k, "") for k in ("kind", "title", "markdown")},
+            session_key=sk,
+        )
+        refused = _error_for(name, d)
+        if refused:
+            return f"{refused}\nThe report was not saved; do not say it was."
+        return _render(
+            {
+                **d,
+                "next": "Saved and the user was notified. Reply with one short line "
+                f"pointing at it ([{d.get('title', 'report')}]({d.get('url', '')})); "
+                "keep the report's text out of the chat.",
+            }
+        )
+    if name == "short_goal_add":
+        body: dict[str, Any] = {"add": args.get("text", "")}
+    else:
+        body = {"id": args.get("id", "")}
+        for key in ("status", "text"):
+            if key in args:
+                body[key] = args[key]
+        if len(body) == 1:
+            return "Error: short_goal_update needs a status or a text."
+    d = _post("/api/member/self/goals/short-term", body, session_key=sk)
+    refused = _error_for(name, d)
+    if refused:
+        return f"{refused}\nYour goals did not change; do not say they did."
+    if d.get("changed") is False:
+        return _render({**d, "next": "That goal already reads that way; nothing changed."})
+    return _render(
+        {
+            **d,
+            "next": "Saved. It shows on your Goals tab, where the user can undo it; "
+            "mention it in a few words only if it matters to what you are saying.",
+        }
+    )
 
 
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
@@ -289,6 +496,15 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     sk, err = _strict_session_key()
     if err:
         return _off_dashboard(name, err)
+
+    if name in (
+        "goal_read",
+        "key_result_progress",
+        "save_goal_report",
+        "short_goal_add",
+        "short_goal_update",
+    ):
+        return _goal_call(name, args, sk)
 
     if name == "update_self":
         fields = {k: args[k] for k in ("display_name", "description", "avatar") if k in args}

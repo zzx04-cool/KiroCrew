@@ -1583,7 +1583,7 @@ description, and only omits the no-description claim when no cached description
 exists. Memory and
 Workspace sit side by side, but Memory is a flat readout — a solid `border-border`
 hairline, transparent background, no hover and no pointer; never dashed, which is
-this card's empty / coming-soon language (Sessions empty, Goals) and would make a
+this card's empty language (Sessions empty) and would make a
 set binding read as not set up — while Workspace keeps the filled clickable-card
 treatment with its hover. Notes, Permissions, and Model follow.
 The pencil, Permissions, and Model entries open the existing `CrewEditorDialog`;
@@ -1689,9 +1689,126 @@ page — advances the Profile open nonce and remounts the card at the requested
 initial tab. The nonce advances only inside the action admitted by the schedule
 draft guard, so a veto neither remounts the card nor loses its pushed form.
 
-**Goals** is a coming-soon placeholder with no input. Goals need a record the
-crewmate can read and act on; a browser-local list it never sees would promise
-the opposite, so none is offered until that record exists.
+**Goals** (`CrewGoals.tsx`, `CrewGoalsPane`) is the crewmate's goal record
+(`member_goals.py`), shared by the user and the crewmate, never written to
+`member-rules/`:
+
+- the **long-term goal**, edited in place by the user (`PUT
+  /api/members/{slug}/goals/long-term`, compare-and-set on `expected`); the
+  crewmate only proposes one (`set_goal` -> a `crewmate.goal` card);
+- up to three **key results** `{id, text, target, current, updated_at,
+  readings[]}`, each with a progress bar (a number reading against a number
+  target, or a word reading equal to a word target) and when it was last read.
+  The crewmate proposes the whole set (`set_key_results` -> a
+  `crewmate.key_results` card) and records readings directly
+  (`key_result_progress`); readings are kept 90 days (at most 200). The user
+  edits one by replacing the set (`PUT .../goals/key-results`) and removes one
+  with `DELETE .../goals/key-results/{kr_id}`, which keeps it, readings and
+  place, as `removed_key_result` for one inline **Undo**
+  (`POST .../goals/key-results/{kr_id}/restore`); any later write to the set
+  ends that Undo. A key result is known by its text and target, so a set
+  holding two with the same pair is refused (`duplicate_key_result`, and the
+  card's params too). An edit keeps its draft on the key result's id and saves
+  against the set as it read when editing began, as the long-term goal's edit
+  saves against the text it started from, so a change made meanwhile is refused
+  rather than overwritten. Each bar says **Updated** with the reading's time, or
+  **No reading yet**;
+- up to twenty **short-term goals** `{id, text, status, updated_at,
+  updated_by}`, each with a checkbox, who changed it last and when, an add box,
+  and an **Undo** for the crewmate's newest change. The tab lists the open ones;
+  done and dropped ones fold behind a **Show N done** disclosure (a button with
+  `aria-expanded`), collapsed by default. At the limit the oldest finished
+  (done or dropped) goal makes room; twenty open goals refuse `too_many_open`;
+- three **check-ins**, each its own switch, off by default and disabled without
+  a long-term goal, sharing one time of day: **Daily Goal Reminder**, **Weekly
+  report** (a weekday) and **Monthly review** (a day of the month, 1-28)
+  (`PUT .../goals/schedules`); the weekday and day-of-month pickers are disabled
+  with their switch. Each switch keeps exactly one gateway schedule of
+  its own (`managed_by` `goal-<cadence>:<slug>`, `dashboard/goal_reminder.py`),
+  removed when it turns off or the goal is cleared. A save and a goal clear hold
+  one per-crewmate lock (`handlers.member_goals._schedule_lock`) across the
+  record write and the reconciliation, which reads the record again inside it,
+  so concurrent saves never remove each other's schedule. When one fires the gateway's
+  cron callback runs it as one hidden gateway-authored turn in the crewmate's
+  thread built from the current record: the daily turn takes fresh readings and
+  keeps short-term goals current; the weekly turn writes a report from the
+  readings' movement and the short-term changes; the monthly turn reviews
+  whether the goal and key results still fit and, when they no longer do,
+  proposes the replacement in that turn as a `crewmate.goal` or
+  `crewmate.key_results` card (nothing changes until the user presses it). It is
+  the only hidden turn that may: `goal_reminder.fire` dispatches it with the
+  crewmate's name as `_run_chat(_goal_review_member=)`, the runner records that on
+  the slot as `_turn_goal_review` only for a `gateway`-actor turn and clears it at
+  the turn's end and on any steer, and `member.propose_self` admits
+  `goal`/`key_results` when that mark names the crewmate whose pinned thread the
+  slot is (`handlers.guide._is_own_goal_review`). The daily and weekly turns, and
+  every other turn the user did not send, still raise no card, and
+  `propose_change` stays user-turn only. Weekly and monthly reports are saved with
+  `save_goal_report` as Markdown artifacts under `Crewmates/<name>/Reports`, the
+  user gets one notification linking it, and the thread carries one short line.
+  A check-in that fires with the thread not open or busy does nothing that time.
+  The check-in jobs are not listed on the Schedule page or in the crewmate's
+  Schedules tab (`GET /api/crons` drops them through
+  `goal_reminder.is_reminder_job`); the switches are their only control;
+- the latest **reports**, each linking its artifact.
+
+The record lives at `trust/member-goals/<slug>.json` and has the same
+protection as `member-rules/`: the tool gate (the sensitive-path floor covers
+`trust/`, so the crewmate's file-write and edit tools are refused there), not an
+OS seal (`trust/` is a read-write leaf of the crew sandbox, so a sandboxed shell
+command can still write it). It is name-scoped like the rules file. Crewmates created before this
+change start with no goal and every check-in off.
+
+The record is held to `member_goals._RECORD_MAX_BYTES` (64 KiB) at write time,
+measured on the exact UTF-8 payload written, which is also the read cap: the
+oldest readings are dropped until it fits, and a write that still does not fit
+is refused `record_too_large`, so a record is never too large to read. Every
+goal string leaves the record through the dashboard's exfiltration-URL and
+credential scrubbers (`member_goals.scrub_text`): the Goals tab and `goal_read`
+view (`public_view`) and the saved report's title and Markdown. The long-term
+and key-results compare-and-sets accept the scrubbed form the page was shown as
+`expected`. Deleting a crewmate removes its check-in schedules
+(`crew_removal._remove_goal_check_ins`) unless another live crew still derives
+the slug; the goal record stays, like the rules file.
+
+Since such a crewmate has a goal and no description, the Profile card's About
+shows the long-term goal, marked **From the goal**, while the description is
+empty; every other reader takes an empty description as it always has. A goal
+record that cannot be read says so there and on the Dashboard tab's summary
+(`ErrorNotice`), instead of reading as "no goal".
+
+A `crewmate.create` card writes its `goal` here as the new crewmate's long-term
+goal, never as `description` (the `POST /api/agents` step sends none). The goal
+is its own apply step after the create (`CREWMATE_CREATE_GOAL_STEP`): a `PUT
+.../goals/long-term` with `expected: ""`, its path segment filled from the
+`member_id` step 0 returned and its `member` from step 0's `name`. Its optional
+`schedule` is the crewmate's work schedule and follows as the last step
+(`CREWMATE_CREATE_SCHEDULE_STEP`), unchanged: the same job name and message, never
+a goal check-in. A failed step stops the plan, so a goal write that fails leaves
+the card `partial` saying the goal (and any schedule) was not saved, and its Undo
+removes only the crewmate.
+A card persisted before goal records (goal in `description`, schedule at step 1,
+`change_card_catalog.legacy_create_apply`) still rebuilds: unstarted, it runs
+the current plan; started, it keeps its plan and evidence indexes, and its Undo
+finds the schedule by the step-1 evidence `id` (`_create_schedule_index`), as
+does the after-read its Undo compares (`change_cards.read_state`).
+
+A `crewmate.key_results` card snapshots the full records too
+(`key_results_records`, never compared: `change_cards.comparable_state` compares
+the `{text, target}` shape only), and its Undo sends them as `restore`. The plan
+is public (`CardStore.public`), so every string in it, the replaced set and the
+restored records with their readings, goes through `member_goals.scrub_text`.
+The restore keeps every key result the card kept exactly as it is now, readings
+recorded since the card included, and brings back from `restore` only the ones
+the card removed, with their ids, readings and current value. A card's goal
+text and key results are cleaned as the record stores them
+(`member_goals.clean_text`), so its after-read shows the write.
+
+The side panel's **Dashboard** tab opens with the same live goal picture
+(`CrewGoalsSummary`: the goal, each key result's reading against its target, the
+open short-term goals and the latest reports), read by the host from the goal
+record above whichever page the tab renders; it is not part of the
+dynamic-dashboard template system.
 
 The chat SidePanel has two standing entries on this page: the leading
 **Dashboard** tab and pinned **Files**. Dashboard is the crewmate's generated HTML

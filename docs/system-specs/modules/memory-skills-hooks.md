@@ -1537,6 +1537,13 @@ exact product-prompt URI stays in the product session-start path, not in
 essentials. Essential sources are validated on every member turn; their
 complete snapshot is submitted only when the conversation needs it.
 
+Between the permanent rules and the briefing the section carries `[YOUR GOAL]`
+when the member has one: the long-term goal (user-owned), its key results with
+their latest readings and the open short-term goals, read from the gateway-only
+goal record (`member_goals.context_block`, `trust/member-goals/<slug>.json`,
+capped at `member_goals.CONTEXT_MAX_CHARS`). Unlike the rules it is total: an
+unreadable record omits the block instead of aborting the turn.
+
 `ContextBuilder` injects the owner's identity, current permanent rules and
 bound custom-template persona on fresh, warm, resumed, post-compaction and
 minimal turns, including delegated and cron turns with no DM member argument.

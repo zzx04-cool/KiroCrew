@@ -530,6 +530,9 @@ async def steer_into_running_turn(
         # (``update_self``), so the turn counts as one the user did not send.
         # Set before the RPC for the reason above; ``chat_runner`` resets it.
         slot._turn_user_sent = False
+    # Any text steered into a Monthly review, the user's included, makes it more
+    # than the gateway's own review turn, so its card admission ends here.
+    slot._turn_goal_review = ""
     if admission is not None:
         slot._steer_admissions[message] = admission
     if attachments or quote:

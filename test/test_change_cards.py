@@ -204,15 +204,21 @@ def test_crewmate_create_binds_its_schedule_to_the_created_identity():
         {"name": "Scout", "goal": "watch PRs", "schedule": {"cron_expr": "0 9 * * *"}},
     )
     plan = catalog.build_preview("crewmate.create", p, {"exists": False}, {})["apply"]
-    assert [s["path"] for s in plan] == ["/api/agents", "/api/crons"]
-    assert plan[1]["fill"] == [
+    assert [s["path"] for s in plan] == [
+        "/api/agents",
+        "/api/members/{{step0.member_id}}/goals/long-term",
+        "/api/crons",
+    ]
+    assert plan[2]["fill"] == [
         {"field": "member_id", "source": "step", "step": 0, "key": "member_id"}
     ]
-    # Partial: the crewmate exists but the schedule failed; undo removes only the crewmate.
-    undo, _ = catalog.build_undo("crewmate.create", p, {}, [{"name": "scout"}], applied_steps=1)
-    assert undo == [{"method": "DELETE", "path": "/api/agents/scout", "body": None}]
+    # Partial: the crewmate exists but a later step failed; undo removes only the crewmate.
+    for applied in (1, 2):
+        evidence = [{"name": "scout"}, {}][:applied]
+        undo, _ = catalog.build_undo("crewmate.create", p, {}, evidence, applied_steps=applied)
+        assert undo == [{"method": "DELETE", "path": "/api/agents/scout", "body": None}]
     undo, _ = catalog.build_undo(
-        "crewmate.create", p, {}, [{"name": "scout"}, {"id": "j1"}], applied_steps=2
+        "crewmate.create", p, {}, [{"name": "scout"}, {}, {"id": "j1"}], applied_steps=3
     )
     assert [s["path"] for s in undo] == ["/api/crons/j1", "/api/agents/scout"]
 
@@ -543,6 +549,9 @@ def test_a_failed_first_step_is_retryable_and_a_failed_later_step_is_partial():
     store.begin_step(rec, revision=1, op="apply", index=1)
     store.record_failure(rec, op="apply", index=1, status=500, body=None)
     assert rec["status"] == "partial"
+    assert rec["result"]["summary"] == (
+        "Created crewmate “Scout”, but its goal or its schedule was not saved"
+    )
 
 
 def test_a_capability_preview_then_failed_put_is_failed_and_retryable():
@@ -4127,3 +4136,94 @@ def test_an_unknown_length_manual_save_is_forwarded_whole(world, monkeypatch):
     # Unknown length: the hook reads nothing and the route gets every byte.
     assert response.status == 200
     assert reached == [17 * 2**16 + len(b'{"name":"files"}')]
+
+
+def _legacy_create_card(store: CardStore, *, applied: bool) -> dict:
+    """A crewmate.create card as a build without goal records stored it."""
+    params = catalog.validate_params(
+        "crewmate.create",
+        {"name": "scout", "goal": "Watch the queue", "schedule": {"cron_expr": "0 9 * * 1"}},
+    )
+    before = {"exists": False, "inherited_auto_approve": []}
+    preview = catalog.build_preview("crewmate.create", params, before, {})
+    preview["apply"] = catalog.legacy_create_apply(params)
+    rec = store.propose(
+        slot_key=SLOT,
+        session_key=SK,
+        kind="crewmate.create",
+        params=params,
+        reason="",
+        preview=preview,
+        before=before,
+        context={},
+    )
+    if applied:
+        evidence = [{"member_id": "scout", "name": "scout"}, {"id": "job1"}]
+        for i, ev in enumerate(evidence):
+            store.begin_step(rec, revision=rec["revision"], op="apply", index=i)
+            store.record_success(rec, op="apply", index=i, evidence=ev)
+        undo, reason = catalog.build_undo("crewmate.create", params, before, evidence, 2, {})
+        store.complete_apply(rec, after={"exists": True}, undo=undo, undo_reason=reason)
+    return json.loads(json.dumps(rec))
+
+
+def test_a_legacy_applied_create_card_survives_a_rebuild_and_keeps_its_undo():
+    """Stored before goal records: schedule at step 1, goal in description."""
+    rec = _legacy_create_card(CardStore(None, clock=Clock()), applied=True)
+    rebuilt = cards.rebuild_record(rec)
+    assert rebuilt is not None
+    assert rebuilt["plan"]["apply"] == rec["plan"]["apply"]
+    assert [s["path"] for s in rebuilt["plan"]["undo"]] == ["/api/crons/job1", "/api/agents/scout"]
+
+
+def test_a_legacy_unrun_create_card_runs_the_current_plan():
+    rec = _legacy_create_card(CardStore(None, clock=Clock()), applied=False)
+    rebuilt = cards.rebuild_record(rec)
+    assert rebuilt is not None
+    assert [s["path"].rsplit("/", 1)[-1] for s in rebuilt["plan"]["apply"]] == [
+        "agents",
+        "long-term",
+        "crons",
+    ]
+
+
+def test_a_current_create_cards_undo_finds_its_schedule_at_step_two():
+    p = catalog.validate_params(
+        "crewmate.create",
+        {"name": "scout", "goal": "Watch", "schedule": {"cron_expr": "0 9 * * 1"}},
+    )
+    undo, _ = catalog.build_undo(
+        "crewmate.create", p, {}, [{"name": "scout"}, {}, {"id": "j2"}], applied_steps=3
+    )
+    assert [s["path"] for s in undo] == ["/api/crons/j2", "/api/agents/scout"]
+
+
+@pytest.mark.parametrize(
+    "evidence, job_id",
+    [
+        ([{"member_id": "scout", "name": "scout"}, {"id": "job1"}], "job1"),
+        ([{"member_id": "scout", "name": "scout"}, {}, {"id": "job2"}], "job2"),
+    ],
+    ids=["legacy", "current"],
+)
+def test_a_create_cards_after_read_finds_its_schedule_at_its_own_step(
+    monkeypatch, evidence, job_id
+):
+    """A legacy card's schedule is step 1, the current one's step 2: both are read."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cards, "_sync_read_state", lambda *_a: {"exists": True})
+    asked: list[str] = []
+
+    async def get_job_async(jid: str):
+        asked.append(jid)
+        return SimpleNamespace() if jid == job_id else None
+
+    state = SimpleNamespace(crons=SimpleNamespace(get_job_async=get_job_async))
+    p = catalog.validate_params(
+        "crewmate.create",
+        {"name": "scout", "goal": "Watch", "schedule": {"cron_expr": "0 9 * * 1"}},
+    )
+    got = asyncio.run(cards.read_state("crewmate.create", p, evidence, state=state, app=None))
+    assert asked == [job_id]
+    assert got["schedule_exists"] is True

@@ -20,6 +20,7 @@ export const FIELD_LABELS: Record<string, () => string> = {
   at: () => i18nT('components.changeCards.field_at'),
   timezone: () => i18nT('components.changeCards.field_timezone'),
   goal: () => i18nT('components.changeCards.field_goal'),
+  key_results: () => i18nT('components.changeCards.field_key_results'),
   auto_approve: () => i18nT('components.changeCards.field_auto_approve'),
   enabled: () => i18nT('components.changeCards.field_enabled'),
   display_name: () => i18nT('components.changeCards.field_display_name'),

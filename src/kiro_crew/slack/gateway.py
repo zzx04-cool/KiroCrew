@@ -3356,6 +3356,14 @@ class GatewayOrchestrator:
                 logger.warning("Cron '%s': run-failure alert failed", job.name, exc_info=True)
 
         async def _cron_callback(job: CronJob) -> str | None:
+            # A crewmate's Daily Goal Reminder is not an ordinary cron turn: it
+            # runs as one hidden turn in the crewmate's own thread, built from
+            # its current goal record (dashboard.goal_reminder).
+            from kiro_crew.dashboard import goal_reminder
+
+            if goal_reminder.is_reminder_job(job):
+                return await goal_reminder.fire(self.dashboard_state, job)
+
             # True once ANY prompt has been handed to the provider this
             # invocation. The whole-callback transient retry below is only
             # safe BEFORE dispatch: after it, tools may have run, so a

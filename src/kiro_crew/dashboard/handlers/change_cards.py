@@ -699,11 +699,21 @@ def match_step(
     :func:`kiro_crew.dashboard.change_cards.canonical`. A ``fill`` field is the
     only allowed difference: a ``user`` fill must be a non-empty string (and is
     never read further), a ``step`` fill must equal what that earlier step's
-    real response returned.
+    real response returned. A ``step`` fill into the path replaces its
+    placeholder segment, and only with a plain identifier.
     """
     if plan_step["method"] != method:
         return "method"
     plan_path, _, plan_query = plan_step["path"].partition("?")
+    fills = plan_step.get("fill") or []
+    for fill in fills:
+        if not catalog.is_path_fill(fill):
+            continue
+        idx = int(fill["step"])
+        value = (evidence[idx] if idx < len(evidence) else {}).get(fill["key"])
+        if not isinstance(value, str) or not catalog.PATH_FILL_VALUE.match(value):
+            return f"fill:{fill['field']}"
+        plan_path = plan_path.replace(catalog.placeholder(fill), value)
     if urllib.parse.unquote(plan_path) != path:
         return "path"
     if dict(urllib.parse.parse_qsl(plan_query)) != query:
@@ -715,7 +725,9 @@ def match_step(
         return "body"
     got = dict(body)
     want = dict(expected)
-    for fill in plan_step.get("fill") or []:
+    for fill in fills:
+        if catalog.is_path_fill(fill):
+            continue
         field = fill["field"]
         value = got.pop(field, None)
         want.pop(field, None)
@@ -990,7 +1002,9 @@ async def _run_card_step(
                 current = await cards.read_state(
                     rec["kind"], rec["params"], [], state=state, app=request.app
                 )
-                if cards.canonical(current) != cards.canonical(rec["before"]):
+                if cards.canonical(cards.comparable_state(rec["kind"], current)) != cards.canonical(
+                    cards.comparable_state(rec["kind"], rec["before"])
+                ):
                     store.abort_step(rec)
                     unsaved = await _published_or_refusal(request, rec, revert)
                     if unsaved is not None:

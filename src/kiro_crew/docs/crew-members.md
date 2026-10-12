@@ -167,6 +167,44 @@ tools, MCP servers and skills (`request_capabilities`); each ask is a change
 card with a button, and nothing changes until you press it. Its workspace,
 memory store and template are not the crewmate's to ask for.
 
+### Goals
+
+A crewmate's **Goals** tab (Profile card) holds what it works toward:
+
+- **The goal.** One paragraph you write, or confirm when the crewmate proposes
+  one (`set_goal` puts a card in its chat).
+- **Key results.** Up to three readings that show how far it is from the goal.
+  The crewmate works them out and proposes them on one card
+  (`set_key_results`); after you confirm, it records readings itself
+  (`key_result_progress`). A goal that cannot be measured has none. You can edit
+  or remove any of them; a removal can be undone right after, readings included.
+- **Short-term goals.** Up to twenty steps toward the goal. You and the
+  crewmate both add, check off and drop them directly; the crewmate's newest
+  change can be undone from the tab. The tab lists the open ones; finished and
+  dropped ones fold behind **Show N done**. At twenty, adding one clears the
+  oldest finished one; with twenty still open, finish or drop one first.
+- **Check-ins.** Three switches, each off by default and only available once a
+  goal is set, sharing one time of day: **Daily Goal Reminder** (the crewmate
+  takes fresh readings and updates its short-term goals), **Weekly report** (on
+  a weekday you pick) and **Monthly review** (on a day of the month you pick).
+  These check-ins do not appear on the Schedule page or the crewmate's Schedules
+  tab; the switches are their only control.
+  The weekly report and the monthly review are saved as reports under
+  `Crewmates/<name>/Reports` in Artifacts, with a notification linking each.
+  When the monthly review finds the goal or its key results no longer fit the
+  work, it puts a card in the chat proposing new ones; nothing changes until you
+  press it.
+
+The goal is stored in the crewmate's goal record,
+`trust/member-goals/<slug>.json` in Kiro Crew's data folder, apart from its
+rules, with the same protection as its rules: the crewmate's file-editing tools
+are refused there, so it changes the goal or its key results only through a card
+you press (a shell command it runs can still reach the folder, as with its
+rules). A crewmate made from chat on a **Create crewmate** card starts with the
+card's goal as its goal; its description stays empty until it or you write one.
+The side panel's **Dashboard** tab shows the same goal picture and the latest
+reports.
+
 Creating a crewmate allocates its memory store for it. That store cannot later
 be pointed somewhere else or shared with another crewmate — `kirocrew agent
 update --memory-store` refuses it — because a crewmate's memory is its identity.

@@ -216,7 +216,12 @@ class TestHiddenKickoff:
             assert slot.task is not None
             await slot.task
         kickoff = cg.FIRST_WELCOME_WITH_CREW.format(name="Mate")
-        assert seen == [(kickoff, {"_synthetic_payload": True, "_turn_actor": "gateway"})]
+        assert seen == [
+            (
+                kickoff,
+                {"_synthetic_payload": True, "_turn_actor": "gateway", "_goal_review_member": ""},
+            )
+        ]
         # The kickoff is never written to the transcript: the only row is the
         # crewmate's own greeting.
         roles = [(m["role"], m["content"]) for m in slot.messages]

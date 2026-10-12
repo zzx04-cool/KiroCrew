@@ -5107,6 +5107,13 @@ _MATE_AUTO_GRANTS = (
     f"@{_MATE_SERVER}/set_model",
     f"@{_MATE_SERVER}/set_approval_mode",
     f"@{_MATE_SERVER}/request_capabilities",
+    f"@{_MATE_SERVER}/goal_read",
+    f"@{_MATE_SERVER}/set_goal",
+    f"@{_MATE_SERVER}/set_key_results",
+    f"@{_MATE_SERVER}/key_result_progress",
+    f"@{_MATE_SERVER}/save_goal_report",
+    f"@{_MATE_SERVER}/short_goal_add",
+    f"@{_MATE_SERVER}/short_goal_update",
 )
 
 

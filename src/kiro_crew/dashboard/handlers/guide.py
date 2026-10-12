@@ -161,7 +161,33 @@ _USER_TURN_OPERATIONS = frozenset(
 )
 
 
-async def _resolve_agent_caller(request: web.Request, operation: str) -> tuple[str, str]:
+#: Request mark :func:`_resolve_agent_caller` sets when it admitted the
+#: gateway's own Monthly review rather than a turn the user sent.
+REQ_GOAL_REVIEW_TURN = "goal_review_turn"
+
+
+def _is_own_goal_review(slot: Any) -> bool:
+    """Whether *slot*'s running turn is the gateway's Monthly review of its own crewmate.
+
+    ``_turn_goal_review`` is written only by the runner, from the gateway's own
+    dispatch (``goal_reminder.fire``), and cleared at the turn's end and by any
+    steer, so neither the model nor a message can set it. It must name the
+    crewmate whose pinned thread this slot is.
+    """
+    from kiro_crew import members as members_mod
+
+    review = getattr(slot, "_turn_goal_review", "")
+    return (
+        isinstance(review, str)
+        and bool(review)
+        and getattr(slot, "mode", "") == members_mod.DM_SLOT_MODE
+        and getattr(slot, "agent", "") == review
+    )
+
+
+async def _resolve_agent_caller(
+    request: web.Request, operation: str, *, goal_review: bool = False
+) -> tuple[str, str]:
     """The verified caller's ``(slot_key, session_key)``. Raises :class:`GuideError`.
 
     The session the request names must be one the transport attests
@@ -182,6 +208,12 @@ async def _resolve_agent_caller(request: web.Request, operation: str) -> tuple[s
     injection, a ``session_send`` and a sub-agent completion are refused with
     403 ``not_user_turn``, and so is a user's turn once any text that is not the
     user's was steered into it (``chat_delivery.steer_into_running_turn``).
+
+    *goal_review* lets one caller (``member.propose_self``) also admit the
+    gateway's own Monthly review of the crewmate whose thread this is
+    (:func:`_is_own_goal_review`); it then marks the request
+    so the route can keep that turn to the goal and key-results cards
+    (:data:`REQ_GOAL_REVIEW_TURN`).
     """
     from kiro_crew.dashboard.handlers._shared import _read_session_key
     from kiro_crew.dashboard.session_control import (
@@ -247,6 +279,9 @@ async def _resolve_agent_caller(request: web.Request, operation: str) -> tuple[s
             "this message came from a messaging channel, not the dashboard",
         )
     if operation in _USER_TURN_OPERATIONS and getattr(slot, "_turn_user_sent", False) is not True:
+        if goal_review and _is_own_goal_review(slot):
+            request[REQ_GOAL_REVIEW_TURN] = True
+            return slot_key, sk
         _audit(sk, operation, "denied", "not a user turn")
         raise GuideError(
             403,

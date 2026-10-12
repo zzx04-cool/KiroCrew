@@ -135,6 +135,7 @@ import { threadsApi, threadsQueryKey } from '../../api/threads'
 import ThreadPanel from './ThreadPanel'
 import CrewmateSwitcher, { CrewmateUnreadColumn } from './CrewmateSwitcher'
 import CrewProfilePanel, { PROFILE_FACE_PX, type ProfileTab } from './CrewProfilePanel'
+import CrewGoalsPane, { CrewGoalsSummary, useMemberGoals } from './CrewGoals'
 import CrewComposer from './CrewComposer'
 import { createPortal } from 'react-dom'
 import { useCrewmateThreadsFlag } from '../../hooks/useCrewmateThreadsFlag'
@@ -3090,6 +3091,10 @@ export default function MembersPage() {
   // Same key and same queryFn as the pane inside (`crewWakeQueryKey` +
   // `api.crons()`), so opening the tab spends no second request and the chip can
   // never disagree with the list it summarizes.
+  // The long-term goal, for the profile card's About when the crewmate has no
+  // description: a crewmate made from a Create crewmate card starts with a goal
+  // and no description. Same query key as the Goals tab, so no second request.
+  const profileGoalsQuery = useMemberGoals(activeSlug, activeMemberName, !!profile)
   const schedulesCountQuery = useQuery({
     queryKey: crewWakeQueryKey(activeMemberName),
     queryFn: () => api.crons(),
@@ -5433,6 +5438,9 @@ export default function MembersPage() {
               {!confirmedSlot && !activeThreadFailed && activeSlot
                 ? <p role="status" className="px-4 pt-3 text-sm text-muted">{t('pages.membersPage.opening_thread')}</p>
                 : null}
+              {/* The live goal picture, read by the host from the goal record,
+                  above whichever page the tab renders. */}
+              {activeSlug && activeMemberName && <CrewGoalsSummary slug={activeSlug} member={activeMemberName} />}
               {activeSlug && activeMemberName && (
                 // A preview link is drawn by the dynamic dashboard whatever the
                 // Feature Preview says: the staged page exists only in that form,
@@ -5603,6 +5611,8 @@ export default function MembersPage() {
               slotKey={activeSlot || active.slot_key}
               description={profileRegistryQuery.data?.agents.find((a) => a.name === active.name)?.description ?? ''}
               descriptionError={profileRegistryQuery.isError}
+              goal={profileGoalsQuery.data?.long_term ?? ''}
+              goalError={profileGoalsQuery.isError}
               memoryLabel={t(PROFILE_MEMORY_KEYS[memberMemoryDisplay(activeView)])}
               // Only a crewmate's OWN (V2) store has a page to manage; the shared
               // global store is not this crewmate's, so that tile stays a readout.
@@ -5619,6 +5629,9 @@ export default function MembersPage() {
               newScheduleBody={schedulesBody}
               sessionsBody={sessionsBody}
               notesBody={notesBody}
+              goalsBody={activeSlug && activeMemberName ? (
+                <CrewGoalsPane slug={activeSlug} member={activeMemberName} name={crewDisplayName(activeView ?? active)} />
+              ) : null}
               faceRef={cardFaceRef}
               faceHidden={!!faceFlight}
               settingsBody={<Suspense fallback={null}><CrewProfileSettings member={activeView} slotKey={confirmedSlot || null} waiting={!confirmedSlot} /></Suspense>}

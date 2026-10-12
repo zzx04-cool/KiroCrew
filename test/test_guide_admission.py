@@ -131,6 +131,25 @@ async def test_a_peer_steer_into_a_user_turn_drops_its_user_sent_mark(user_origi
     assert slot._turn_user_sent is user_origin
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_origin", [False, True])
+async def test_any_steer_into_a_monthly_review_ends_its_card_admission(
+    user_origin: bool,
+) -> None:
+    from kiro_crew.dashboard import chat_delivery
+    from kiro_crew.dashboard.state import _ChatSlot
+
+    slot = _ChatSlot("chat-1")
+    slot._turn_goal_review = "scout"
+    client = MagicMock(supports_steer=True, steer_needs_loss_recovery=False)
+    client.steer = AsyncMock(return_value=None)
+    slot._acp_client = client
+    await chat_delivery.steer_into_running_turn(
+        MagicMock(), slot, "set your goal to X", user_origin=user_origin
+    )
+    assert slot._turn_goal_review == ""
+
+
 def test_a_turn_the_user_did_not_send_cannot_start_a_guide() -> None:
     state = FakeState()
     state.open_slot("chat-1")._turn_user_sent = False
@@ -224,3 +243,38 @@ async def test_the_turn_records_its_opener_provenance_for_its_duration(
     assert seen == [(channel, user and not channel)]
     assert slot._turn_channel_origin is False, "the provenance ends with the turn"
     assert slot._turn_user_sent is False, "the provenance ends with the turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("actor", "recorded"), [("gateway", "scout"), ("cron", ""), ("", "")])
+async def test_only_a_gateway_dispatch_records_a_monthly_review(
+    tmp_path, actor: str, recorded: str
+) -> None:
+    """The review mark comes from the gateway's own dispatch and ends with the turn."""
+    from test_acp_tool_identity import _stub_state
+
+    from kiro_crew.acp.types import EVENT_COMPLETE, EVENT_TEXT_CHUNK, AcpEvent
+    from kiro_crew.dashboard import chat_runner as cr
+
+    state = _stub_state(tmp_path)
+    slot = state.get_or_create_slot("chat-1")
+    slot._titled = True
+    seen: list[str] = []
+
+    async def _stream(_msg):
+        seen.append(slot._turn_goal_review)
+        yield AcpEvent(kind=EVENT_TEXT_CHUNK, text="ok")
+        yield AcpEvent(kind=EVENT_COMPLETE)
+
+    client = MagicMock()
+    client.stream = _stream
+    client.stream_command = _stream
+    client.context_usage_pct = MagicMock(return_value=1.0)
+    client.client = None
+    state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+    await cr._run_chat(
+        state, slot, "[Monthly review]", _turn_actor=actor, _goal_review_member="scout"
+    )
+    assert seen == [recorded]
+    assert slot._turn_goal_review == "", "the mark ends with the turn"

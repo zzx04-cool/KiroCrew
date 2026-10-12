@@ -58,6 +58,8 @@ KIND_SCHEDULE_UPDATE = "schedule.update"
 KIND_CREWMATE_CREATE = "crewmate.create"
 KIND_CREWMATE_UPDATE = "crewmate.update"
 KIND_CREWMATE_CAPABILITIES = "crewmate.capabilities"
+KIND_CREWMATE_GOAL = "crewmate.goal"
+KIND_CREWMATE_KEY_RESULTS = "crewmate.key_results"
 KIND_TEMPLATE_UPDATE = "template.update"
 KIND_MCP_INSTALL = "mcp.install"
 KIND_MCP_ADD_CUSTOM = "mcp.add_custom"
@@ -66,6 +68,11 @@ KIND_CONNECTION_CONNECT = "connection.connect"
 KIND_SECRET_SAVE = "secret.save"
 KIND_TRUST_APP = "trust.app"
 KIND_DENIED_COMMAND = "denied_command"
+
+#: The steps of a ``crewmate.create`` apply: the crewmate (0), its long-term goal
+#: in its goal record (1), and its optional work schedule (2).
+CREWMATE_CREATE_GOAL_STEP = 1
+CREWMATE_CREATE_SCHEDULE_STEP = 2
 
 LIST_OP_ADD = "add"
 LIST_OP_REMOVE = "remove"
@@ -89,6 +96,12 @@ _NAME_MAX = 128
 _TEXT_MAX = 4000
 _CREWMATE_NAME_MAX = 24
 _CREWMATE_GOAL_MAX = 200
+#: A crewmate's long-term goal, as ``member_goals.LONG_TERM_MAX_CHARS`` stores it.
+_LONG_TERM_GOAL_MAX = 2000
+#: Key results, as ``member_goals`` bounds them.
+_MAX_KEY_RESULTS = 3
+_KR_TEXT_MAX = 200
+_KR_VALUE_MAX = 40
 _PATTERN_MAX = 500
 _MAX_CUSTOM_SERVERS = 8
 _MAX_LIST_ITEMS = 300
@@ -280,6 +293,43 @@ KINDS: dict[str, KindDef] = {
             ("draft",),
         ),
         KindDef(
+            KIND_CREWMATE_GOAL,
+            "Set one crewmate's long-term goal: what it works toward. The goal is "
+            "stored in its goal record, never in its rules.",
+            _obj(
+                {
+                    "member": _STR,
+                    "long_term": {"type": "string", "maxLength": _LONG_TERM_GOAL_MAX},
+                },
+                ["member", "long_term"],
+            ),
+            ("long_term",),
+        ),
+        KindDef(
+            KIND_CREWMATE_KEY_RESULTS,
+            "Set one crewmate's key results: one to three readings that show how far it "
+            "is from its long-term goal, replacing the current set. `items` is "
+            "[{text, target}], target a number or a word such as 'yes'.",
+            _obj(
+                {
+                    "member": _STR,
+                    "items": {
+                        "type": "array",
+                        "maxItems": _MAX_KEY_RESULTS,
+                        "items": _obj(
+                            {
+                                "text": {"type": "string", "maxLength": _KR_TEXT_MAX},
+                                "target": {"type": "string", "maxLength": _KR_VALUE_MAX},
+                            },
+                            ["text", "target"],
+                        ),
+                    },
+                },
+                ["member", "items"],
+            ),
+            ("items",),
+        ),
+        KindDef(
             KIND_TEMPLATE_UPDATE,
             "Change an agent template's tools, allowedTools, skills or model. Affects "
             "every member built from it.",
@@ -402,6 +452,25 @@ def _clean_str(
         raise _fail("invalid_param", f"'{key}' has control characters")
     if pattern is not None and value and not pattern.fullmatch(value):
         raise _fail("invalid_param", f"'{key}' has invalid characters")
+    return value
+
+
+def _goal_text(params: dict[str, Any], key: str, *, max_len: int, multiline: bool) -> str:
+    """*key* as the goal record stores it (:func:`kiro_crew.member_goals.clean_text`).
+
+    A card's params are what its apply writes and what its after-read is compared
+    with, so they carry the record's own normalisation: a tab, a line break in a
+    one-line field or a format character reads as the store will keep it.
+    """
+    from kiro_crew import member_goals
+
+    raw = _clean_str(params, key, max_len=max_len)
+    try:
+        value = member_goals.clean_text(raw, max_chars=max_len, multiline=multiline, what=key)
+    except member_goals.GoalError as exc:
+        raise _fail("invalid_param", f"'{key}': {exc}") from None
+    if not value:
+        raise _fail("invalid_param", f"'{key}' must not be empty")
     return value
 
 
@@ -625,6 +694,30 @@ def validate_params(kind: str, params: Any) -> dict[str, Any]:
         if "enroll" in draft:
             clean_draft["enroll"] = _clean_bool(draft, "enroll")
         return {"member": member, "draft": clean_draft}
+    if kind == KIND_CREWMATE_GOAL:
+        _only(p, {"member", "long_term"})
+        return {
+            "member": _member_name(p, "member"),
+            "long_term": _goal_text(p, "long_term", max_len=_LONG_TERM_GOAL_MAX, multiline=True),
+        }
+    if kind == KIND_CREWMATE_KEY_RESULTS:
+        _only(p, {"member", "items"})
+        raw = p.get("items")
+        if not isinstance(raw, list) or not 1 <= len(raw) <= _MAX_KEY_RESULTS:
+            raise _fail("invalid_param", f"'items' must hold 1 to {_MAX_KEY_RESULTS} key results")
+        items = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise _fail("invalid_param", "each key result is {text, target}")
+            _only(item, {"text", "target"}, "key result")
+            kr = {
+                "text": _goal_text(item, "text", max_len=_KR_TEXT_MAX, multiline=False),
+                "target": _goal_text(item, "target", max_len=_KR_VALUE_MAX, multiline=False),
+            }
+            if kr in items:
+                raise _fail("invalid_param", "two key results have the same text and target")
+            items.append(kr)
+        return {"member": _member_name(p, "member"), "items": items}
     if kind == KIND_TEMPLATE_UPDATE:
         _only(p, {"template", "fields"})
         template = _clean_str(p, "template", pattern=_TEMPLATE_NAME_RE)
@@ -758,6 +851,24 @@ def _user_fill(field: str) -> dict[str, Any]:
 
 def _step_fill(field: str, step_index: int, key: str) -> dict[str, Any]:
     return {"field": field, "source": "step", "step": step_index, "key": key}
+
+
+def _step_path_fill(field: str, step_index: int, key: str) -> dict[str, Any]:
+    """A ``step`` fill of one path segment instead of a body field.
+
+    The step's path carries :func:`placeholder` where the segment goes, and the
+    value must be a plain identifier (:data:`PATH_FILL_VALUE`), so an earlier
+    response can never add a segment or a query to the path.
+    """
+    return {**_step_fill(field, step_index, key), "in": "path"}
+
+
+def is_path_fill(fill: dict[str, Any]) -> bool:
+    return fill.get("in") == "path"
+
+
+#: What a path fill may stand for: one segment of identifier characters.
+PATH_FILL_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
 
 def placeholder(fill: dict[str, Any]) -> str:
@@ -1110,6 +1221,13 @@ def build_preview(
                 }
             )
             out["risk"] = RISK_WIDEN
+        # The goal is the crewmate's long-term goal in its goal record, never its
+        # description. The record is addressed by the member_id the create
+        # returns, so the goal is written only once the crewmate exists.
+        goal_fills = [
+            _step_path_fill("slug", 0, "member_id"),
+            _step_fill("member", 0, "name"),
+        ]
         apply = [
             step(
                 "POST",
@@ -1117,27 +1235,22 @@ def build_preview(
                 {
                     "name": p["name"],
                     "kiro_agent": DEFAULT_CREWMATE_TEMPLATE,
-                    "description": p["goal"],
                     "source": "kirocrew",
                 },
-            )
+            ),
+            step(
+                "PUT",
+                f"/api/members/{placeholder(goal_fills[0])}/goals/long-term",
+                _with_fills({"long_term": p["goal"], "expected": ""}, goal_fills[1:]),
+                fill=goal_fills,
+            ),
         ]
         schedule = p.get("schedule")
         if schedule:
             out["changes"].append(
                 {"field": "cron_expr", "label": "When", "after": schedule["cron_expr"]}
             )
-            fills = [_step_fill("member_id", 0, "member_id")]
-            body = {
-                "name": f"{p['name']} schedule",
-                "message": p["goal"],
-                "agent": DEFAULT_CREWMATE_TEMPLATE,
-                "silent": False,
-                "hide_in_chat": False,
-                "strict_schedule": True,
-                **_cron_body(schedule),
-            }
-            apply.append(step("POST", "/api/crons", _with_fills(body, fills), fill=fills))
+            apply.append(_create_schedule_step(p))
         out["apply"] = apply
     elif kind == KIND_CREWMATE_UPDATE:
         if not snapshot.get("exists"):
@@ -1190,6 +1303,57 @@ def build_preview(
         out["scope"] = {"members": [label], "count": 1, "only_this_member": True}
         out["apply"] = [
             step("PUT", f"/api/agents/{_q(p['name'])}", _crewmate_put_body(changed, stored))
+        ]
+    elif kind == KIND_CREWMATE_GOAL:
+        if not snapshot.get("exists") or not snapshot.get("slug"):
+            raise _fail("not_found", f"no crewmate named '{p['member']}'")
+        before = str(snapshot.get("long_term") or "")
+        if before == p["long_term"]:
+            raise _fail("no_change", "the crewmate already has that goal")
+        label = str(context.get("label") or p["member"])
+        out["title"] = f"Set the goal for “{label}”"
+        out["changes"] = [
+            {"label": "Goal", "field": "goal", "before": before or None, "after": p["long_term"]}
+        ]
+        out["scope"] = {"members": [label], "count": 1, "only_this_member": True}
+        out["apply"] = [
+            step(
+                "PUT",
+                _goal_path(str(snapshot["slug"])),
+                {"member": p["member"], "long_term": p["long_term"], "expected": before},
+            )
+        ]
+    elif kind == KIND_CREWMATE_KEY_RESULTS:
+        if not snapshot.get("exists") or not snapshot.get("slug"):
+            raise _fail("not_found", f"no crewmate named '{p['member']}'")
+        if not snapshot.get("has_goal"):
+            raise _fail("no_goal", "the crewmate has no long-term goal to measure yet")
+        before_set = list(snapshot.get("key_results") or [])
+        if before_set == p["items"]:
+            raise _fail("no_change", "the crewmate already has those key results")
+        label = str(context.get("label") or p["member"])
+        # The plan and the change lines are public (CardStore.public); the set
+        # they replace is shown as the Goals tab shows it, scrubbed. The route
+        # takes the scrubbed set as ``expected``.
+        before_set = _scrub_kr_shape(before_set)
+        old_lines = [_kr_line(k) for k in before_set]
+        new_lines = [_kr_line(k) for k in p["items"]]
+        out["title"] = f"Set the key results for “{label}”"
+        out["changes"] = [
+            {
+                "label": "Key results",
+                "field": "key_results",
+                "add": [ln for ln in new_lines if ln not in old_lines],
+                "remove": [ln for ln in old_lines if ln not in new_lines],
+            }
+        ]
+        out["scope"] = {"members": [label], "count": 1, "only_this_member": True}
+        out["apply"] = [
+            step(
+                "PUT",
+                _key_results_path(str(snapshot["slug"])),
+                {"member": p["member"], "items": p["items"], "expected": before_set},
+            )
         ]
     elif kind == KIND_CREWMATE_CAPABILITIES:
         revision = snapshot.get("revision")
@@ -1423,6 +1587,98 @@ def _toggle_step(p: dict[str, Any], enabled: bool) -> dict[str, Any]:
     return step("POST", "/api/mcp/toggle", {"name": p["name"], "enabled": enabled})
 
 
+def _create_schedule_step(p: dict[str, Any]) -> dict[str, Any]:
+    """A ``crewmate.create`` card's work-schedule step, filled from step 0."""
+    fills = [_step_fill("member_id", 0, "member_id")]
+    body = {
+        "name": f"{p['name']} schedule",
+        "message": p["goal"],
+        "agent": DEFAULT_CREWMATE_TEMPLATE,
+        "silent": False,
+        "hide_in_chat": False,
+        "strict_schedule": True,
+        **_cron_body(p["schedule"]),
+    }
+    return step("POST", "/api/crons", _with_fills(body, fills), fill=fills)
+
+
+def legacy_create_apply(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """The apply plan a ``crewmate.create`` card was stored with before goal records.
+
+    The goal went into ``description`` and the schedule was step 1. A card
+    persisted in that shape is still a valid record (``rebuild_record``): its
+    applied steps and evidence keep their indexes, so its Undo still finds the
+    schedule it made (:func:`_create_schedule_index`).
+    """
+    p = params
+    apply = [
+        step(
+            "POST",
+            "/api/agents",
+            {
+                "name": p["name"],
+                "kiro_agent": DEFAULT_CREWMATE_TEMPLATE,
+                "description": p["goal"],
+                "source": "kirocrew",
+            },
+        )
+    ]
+    if p.get("schedule"):
+        apply.append(_create_schedule_step(p))
+    return apply
+
+
+#: Where the schedule step of a legacy-shaped ``crewmate.create`` card sits.
+LEGACY_CREWMATE_CREATE_SCHEDULE_STEP = 1
+
+
+def _create_schedule_index(evidence: list[dict[str, Any]]) -> int:
+    """The step index of a ``crewmate.create`` card's schedule, by its evidence.
+
+    Step 1 of the current plan is the goal write, whose evidence never holds an
+    ``id``; a legacy card's step 1 was the schedule, whose evidence is its job id.
+    """
+    legacy = len(evidence) > 1 and isinstance(evidence[1], dict) and "id" in evidence[1]
+    return LEGACY_CREWMATE_CREATE_SCHEDULE_STEP if legacy else CREWMATE_CREATE_SCHEDULE_STEP
+
+
+def _goal_path(slug: str) -> str:
+    return f"/api/members/{_q(slug)}/goals/long-term"
+
+
+def _key_results_path(slug: str) -> str:
+    return f"/api/members/{_q(slug)}/goals/key-results"
+
+
+def _scrub_kr_shape(items: list[Any]) -> list[dict[str, str]]:
+    from kiro_crew.member_goals import key_result_shape, scrub_text
+
+    return [{k: scrub_text(v) for k, v in i.items()} for i in key_result_shape(items)]
+
+
+def _scrub_kr_records(records: list[Any]) -> list[dict[str, Any]]:
+    """Key-result records with every string through the goal scrubber."""
+    from kiro_crew.member_goals import scrub_text
+
+    out = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        clean = {k: scrub_text(v) if isinstance(v, str) else v for k, v in rec.items()}
+        clean["id"] = rec.get("id")
+        clean["readings"] = [
+            {**r, "value": scrub_text(r.get("value", ""))}
+            for r in rec.get("readings") or []
+            if isinstance(r, dict)
+        ]
+        out.append(clean)
+    return out
+
+
+def _kr_line(item: dict[str, Any]) -> str:
+    return f"{item.get('text', '')} → {item.get('target', '')}"
+
+
 def _capability_plan(member: str, revision: str, draft: dict[str, Any]) -> list[dict[str, Any]]:
     base = {"revision": revision, **copy.deepcopy(draft)}
     fills = [_step_fill("preview_token", 0, "preview_token")]
@@ -1493,7 +1749,12 @@ def extract_evidence(
     def pick(*keys: str) -> dict[str, Any]:
         return {k: data[k] for k in keys if isinstance(data.get(k), (str, int, bool))}
 
-    if kind in (KIND_SCHEDULE_CREATE,) or (kind == KIND_CREWMATE_CREATE and step_index == 1):
+    if kind == KIND_SCHEDULE_CREATE or (
+        # Step 1 is a legacy card's schedule; the goal write it is now answers
+        # no ``id``, so the pick stays empty there.
+        kind == KIND_CREWMATE_CREATE
+        and step_index in (LEGACY_CREWMATE_CREATE_SCHEDULE_STEP, CREWMATE_CREATE_SCHEDULE_STEP)
+    ):
         return pick("id")
     if kind == KIND_CREWMATE_CREATE and step_index == 0:
         return pick("member_id", "name")
@@ -1598,8 +1859,10 @@ def _build_undo(
         return [step("DELETE", f"/api/crons/{_q(str(job_id))}")], None
     if kind == KIND_CREWMATE_CREATE:
         plan = []
-        if applied_steps > 1 and ev(1).get("id"):
-            plan.append(step("DELETE", f"/api/crons/{_q(str(ev(1)['id']))}"))
+        at = _create_schedule_index(evidence)
+        job_id = ev(at).get("id")
+        if applied_steps > at and job_id:
+            plan.append(step("DELETE", f"/api/crons/{_q(str(job_id))}"))
         name = ev(0).get("name") or p["name"]
         plan.append(step("DELETE", f"/api/agents/{_q(str(name))}"))
         return plan, None
@@ -1617,6 +1880,42 @@ def _build_undo(
         # refuses to overwrite it (409 approval_mode_conflict).
         return [
             step("PUT", f"/api/agents/{_q(p['name'])}", _crewmate_put_body(old, p["fields"]))
+        ], None
+    if kind == KIND_CREWMATE_GOAL:
+        # Back to the goal before the card, and only while the goal still reads
+        # as the card wrote it: the route's compare-and-set refuses otherwise.
+        slug = before.get("slug")
+        if not slug:
+            return None, "identity_unknown"
+        return [
+            step(
+                "PUT",
+                _goal_path(str(slug)),
+                {
+                    "member": p["member"],
+                    "long_term": str(before.get("long_term") or ""),
+                    "expected": p["long_term"],
+                },
+            )
+        ], None
+    if kind == KIND_CREWMATE_KEY_RESULTS:
+        slug = before.get("slug")
+        if not slug:
+            return None, "identity_unknown"
+        return [
+            step(
+                "PUT",
+                _key_results_path(str(slug)),
+                {
+                    "member": p["member"],
+                    "items": _scrub_kr_shape(list(before.get("key_results") or [])),
+                    # The pre-change records by id, scrubbed: the plan is public.
+                    # The route keeps every id still in the set as it is now and
+                    # puts back only the ones the card removed.
+                    "restore": _scrub_kr_records(list(before.get("key_results_records") or [])),
+                    "expected": p["items"],
+                },
+            )
         ], None
     if kind == KIND_CREWMATE_CAPABILITIES:
         # Step 0 is a preview (not a write), step 1 is the PUT. ``applied_steps``
@@ -1670,13 +1969,29 @@ def undo_label(kind: str) -> str:
     return "undo"
 
 
-def result_summary(kind: str, params: dict[str, Any], status: str, title: str) -> str:
-    """One line for the collapsed card and the agent's results block."""
+def result_summary(
+    kind: str,
+    params: dict[str, Any],
+    status: str,
+    title: str,
+    *,
+    failed_step: int | None = None,
+) -> str:
+    """One line for the collapsed card and the agent's results block.
+
+    *failed_step* is the apply step a ``partial`` card stopped at, when known.
+    """
     if status == "applied":
         return f"Done: {title}"
     if status == "partial":
         if kind == KIND_CREWMATE_CREATE:
-            return f"Created crewmate “{params.get('name')}”, but its schedule was not saved"
+            name = params.get("name")
+            if failed_step == CREWMATE_CREATE_GOAL_STEP:
+                # A failed step stops the plan, so a schedule after it never ran.
+                rest = " or its schedule" if params.get("schedule") else ""
+                return f"Created crewmate “{name}”, but its goal{rest} was not saved"
+            if failed_step == CREWMATE_CREATE_SCHEDULE_STEP:
+                return f"Created crewmate “{name}”, but its schedule was not saved"
         return f"Partly applied: {title}"
     if status == "undone":
         return f"Restored: {title}"
@@ -1717,6 +2032,12 @@ def describe_manual_change(
         if segments & {"token", "secret", "password", "key", "credential", "credentials"}:
             return f"changed config {s(path)}"
         return f"changed config {s(path)} {s(before)}→{s(b.get('value'))}"
+    if route == ("PUT", "/api/members/{slug}/goals/key-results"):
+        raw_items = b.get("items")
+        count = len(raw_items) if isinstance(raw_items, list) else 0
+        return f"set {count} key results for crewmate {s(b.get('member'))}"
+    if route == ("PUT", "/api/members/{slug}/goals/long-term"):
+        return f"set the goal of crewmate {s(b.get('member'))} to {s(b.get('long_term'))}"
     if route == ("PUT", "/api/dashboard/config"):
         prior = before if isinstance(before, dict) else {}
         parts = []
@@ -1814,6 +2135,8 @@ HOOKED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/agents/{name}/capabilities/preview"),
         ("PUT", "/api/agents/{name}/capabilities"),
         ("PATCH", "/api/agents/detail/{name}"),
+        ("PUT", "/api/members/{slug}/goals/long-term"),
+        ("PUT", "/api/members/{slug}/goals/key-results"),
         ("POST", "/api/mcp/discover/install"),
         ("POST", "/api/mcp/custom"),
         ("POST", "/api/mcp/remove"),

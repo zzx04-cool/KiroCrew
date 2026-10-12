@@ -5014,6 +5014,50 @@ MCP_MATE_SCHEMAS: dict[str, ToolSchema] = {
             FieldSpec("reason", str, max_len=500),
         ],
     ),
+    "goal_read": ToolSchema(tool_name="goal_read", fields=[]),
+    "set_goal": ToolSchema(
+        tool_name="set_goal",
+        fields=[
+            FieldSpec("long_term", str, required=True, max_len=2000),
+            FieldSpec("reason", str, max_len=500),
+        ],
+    ),
+    "set_key_results": ToolSchema(
+        tool_name="set_key_results",
+        fields=[
+            FieldSpec("items", list, required=True),
+            FieldSpec("reason", str, max_len=500),
+        ],
+    ),
+    "key_result_progress": ToolSchema(
+        tool_name="key_result_progress",
+        fields=[
+            FieldSpec("id", str, required=True, max_len=16),
+            FieldSpec("current", str, required=True, max_len=40),
+        ],
+    ),
+    "save_goal_report": ToolSchema(
+        tool_name="save_goal_report",
+        fields=[
+            FieldSpec(
+                "kind", str, required=True, max_len=8, allowed=frozenset({"weekly", "monthly"})
+            ),
+            FieldSpec("title", str, required=True, max_len=200),
+            FieldSpec("markdown", str, required=True, max_len=40_000),
+        ],
+    ),
+    "short_goal_add": ToolSchema(
+        tool_name="short_goal_add",
+        fields=[FieldSpec("text", str, required=True, max_len=300)],
+    ),
+    "short_goal_update": ToolSchema(
+        tool_name="short_goal_update",
+        fields=[
+            FieldSpec("id", str, required=True, max_len=16),
+            FieldSpec("status", str, max_len=16, allowed=frozenset({"open", "done", "dropped"})),
+            FieldSpec("text", str, max_len=300),
+        ],
+    ),
 }
 
 MCP_COMPUTER_SCHEMAS: dict[str, ToolSchema] = {

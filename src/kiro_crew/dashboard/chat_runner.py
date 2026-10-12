@@ -8235,6 +8235,7 @@ async def _end_turn_tail(
         slot._turn_channel_narrowed = False
         slot._turn_channel_origin = False
         slot._turn_user_sent = False
+        slot._turn_goal_review = ""
     # A healthy `wait` clears its own state with a final keepalive ping, but
     # that ping is best-effort and cannot run at all if the MCP subprocess died
     # mid-sleep (hard stop, crash, gateway abort). Clearing at turn end is the
@@ -8626,6 +8627,10 @@ async def _run_chat(
     # crew log's whole premise is that a reader takes it as fact. Empty means no
     # dispatch claimed it, which the crew log records as ``user``.
     _turn_actor: str = "",
+    # The crewmate whose Monthly review this gateway-authored turn is
+    # (`goal_reminder.fire`); only a direct gateway dispatch passes it, never a
+    # queue entry or a replay, so nothing the message says can claim it.
+    _goal_review_member: str = "",
     regenerate_hint: str = "",
     _on_consumed: "Callable[[bool], None] | None" = None,
     _on_irreversibly_consumed: "Callable[[], Awaitable[None] | None] | None" = None,
@@ -8718,6 +8723,7 @@ async def _run_chat(
         slot._turn_channel_narrowed = False
         slot._turn_channel_origin = bool(_directive_channel_origin)
         slot._turn_user_sent = bool(_directive_user_origin) and not _directive_channel_origin
+        slot._turn_goal_review = _goal_review_member if _turn_actor == "gateway" else ""
     # Dispatch appends the triggering row before entering this runner. Freeze
     # that row now, before await points, prompt expansion or new deliveries.
     _current_replay_message = _current_message

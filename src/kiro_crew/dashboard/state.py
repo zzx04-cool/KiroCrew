@@ -3098,6 +3098,7 @@ class _ChatSlot:
         "_turn_channel_narrowed",
         "_turn_channel_origin",
         "_turn_user_sent",
+        "_turn_goal_review",
         "_steer_admissions",
         "_steer_decision_strips",
         "_steer_possibly_delivered",
@@ -4262,6 +4263,12 @@ class _ChatSlot:
         # that is not the user's clears it (`chat_delivery`), so the guide routes
         # that act for the user refuse them.
         self._turn_user_sent: bool = False
+        # The crewmate whose Monthly review the running turn is, when the gateway
+        # itself started it (`goal_reminder.fire` -> `_run_chat(_goal_review_member=)`),
+        # else "". Set and cleared beside `_turn_user_sent`, and cleared by any
+        # text steered into the turn (`chat_delivery`): it admits that turn's
+        # goal and key-results cards and nothing else (`handlers.guide`).
+        self._turn_goal_review: str = ""
         # The containment that held when an in-flight steer was AUTHORIZED, keyed by
         # the same message text and kept in the same LOCKSTEP. The requeue stamps it
         # on the queue entry instead of reading the slot again: its own moment is the

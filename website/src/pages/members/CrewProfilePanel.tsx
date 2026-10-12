@@ -35,6 +35,10 @@ export interface CrewProfilePanelProps {
   description: string
   /** The crew registry read failed; retained cached description data may still be shown. */
   descriptionError?: boolean
+  /** The crewmate's long-term goal; About shows it when there is no description. */
+  goal?: string
+  /** The goal record read failed, so About cannot tell whether there is a goal. */
+  goalError?: boolean
   /** Where its memory lives, already worded by the page (private / global / …). */
   memoryLabel: string
   /** Opens the management page of THIS crewmate's private memory store.
@@ -62,6 +66,9 @@ export interface CrewProfilePanelProps {
   newScheduleBody: ReactNode
   sessionsBody: ReactNode
   notesBody: ReactNode
+  /** The Goals tab: the long-term goal, its key results, the short-term goals
+   *  and the check-in switches (CrewGoalsPane). */
+  goalsBody?: ReactNode
   /** The crewmate's permission, model and effort controls (CrewProfileSettings).
    *  They are set here, never in the chat composer. */
   settingsBody?: ReactNode
@@ -143,8 +150,8 @@ function Tile({ icon, tone, label, value, title, onClick, testId }: {
  * the selected tab's word. Profile is a summary with doors (edit, description,
  * memory, workspace, notes) plus the crewmate's own settings (permission,
  * model, effort); Schedules is a readable list of
- * what wakes it; Sessions is the sessions it is driving; Goals holds its place
- * as coming soon.
+ * what wakes it; Sessions is the sessions it is driving; Goals is the goal
+ * record the user and the crewmate share (CrewGoalsPane).
  *
  * It is a floating card over the right of the thread — a hover card, not a
  * second side panel: rounded on every corner, a third of the row wide, the
@@ -363,6 +370,17 @@ export default function CrewProfilePanel(p: CrewProfilePanelProps) {
                         <ChevronRight size={13} aria-hidden="true" />
                       </button>
                     </>
+                  ) : !p.descriptionError && p.goalError ? (
+                    <ErrorNotice
+                      message={t('pages.membersPage.goals_load_failed')}
+                      askAgent
+                      testId="crew-profile-goal-error"
+                    />
+                  ) : !p.descriptionError && p.goal ? (
+                    <>
+                      <p className="text-[13px] leading-relaxed text-text line-clamp-2 whitespace-pre-wrap" data-testid="crew-profile-goal-fallback">{p.goal}</p>
+                      <p className="mt-1 text-[12px] text-muted">{t('pages.membersPage.profile_about_from_goal')}</p>
+                    </>
                   ) : !p.descriptionError ? (
                     <p className="text-[13px] text-muted">{t('pages.membersPage.profile_no_description')}</p>
                   ) : null}
@@ -384,14 +402,7 @@ export default function CrewProfilePanel(p: CrewProfilePanelProps) {
               <CrewScheduleList jobs={p.schedules} loading={p.schedulesLoading} error={p.schedulesError} nowTs={p.nowTs} onOpenAll={p.onOpenSchedule} onOpenJob={p.onOpenScheduleJob} onCreate={() => push('new-schedule')} />
             )}
             {tab === 'sessions' && p.sessionsBody}
-            {tab === 'goals' && (
-              // Coming soon: goals need a record the crewmate can read and act on,
-              // and a browser-local list it never sees would promise the opposite.
-              <div className="rounded-2xl border border-dashed border-border-strong bg-bg px-4 py-8 text-center text-[13px] text-muted flex flex-col items-center gap-2" data-testid="crew-profile-goals-soon">
-                <Goal size={40} className="opacity-50" aria-hidden="true" />
-                {t('pages.membersPage.profile_goals_soon', { name })}
-              </div>
-            )}
+            {tab === 'goals' && p.goalsBody}
           </div>
         </motion.div>
 
