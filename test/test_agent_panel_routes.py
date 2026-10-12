@@ -13,7 +13,7 @@ import json
 import os
 import shutil
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
@@ -2848,6 +2848,12 @@ APPLY_PATH = "/api/agent-panel/dashboard/apply"
 ROLLBACK_PATH = "/api/agent-panel/dashboard/rollback"
 
 
+@contextmanager
+def _claiming_nothing(_slug: str):
+    """The staging claim with no composed page in it: the template half's case."""
+    yield None
+
+
 def _page_store(monkeypatch, **over: Any) -> SimpleNamespace:
     """A store standing in for the instance module, through this file's own seam.
 
@@ -2879,12 +2885,26 @@ def _page_store(monkeypatch, **over: Any) -> SimpleNamespace:
         InstanceRefused=InstanceRefused,
         InstanceLocked=InstanceLocked,
         InstanceError=Exception,
+        MAX_PREVIEW_AGE_MS=30 * 60 * 1000,
         read=lambda _slug: SimpleNamespace(template_id="fixture-board"),
         # `wire` takes the crew NAME and builds the link from it with the real
         # builder, so a route that forgets to pass the name fails here.
         stage_preview=lambda _slug, **_kw: SimpleNamespace(
             wire=lambda member: {**staged, "preview_url": instance_preview_url(member)}
         ),
+        # NO PACKAGE STAGED, which is this stub's default on purpose: these cases
+        # are the TEMPLATE half of a route that now installs either kind, and a
+        # stub that answered a package here would send every one of them down the
+        # other branch. The package half has its own file,
+        # ``test_dashboard_save_tool.py``.
+        staged_package_preview=lambda _slug: None,
+        # The apply's claim, which yields what is staged under the staging lock.
+        # ``None`` for the same reason, and a real context manager rather than a
+        # lambda: the route uses it in a ``with``, so a stub that is not one fails
+        # as a 500 and hides whatever the case was actually about.
+        claim_package_preview=_claiming_nothing,
+        stage_package_preview=lambda _slug, **_kw: SimpleNamespace(wire=lambda: {}),
+        discard_preview=lambda _slug: None,
         apply_preview=lambda _slug, **_kw: SimpleNamespace(
             instance_version=5, template_id="fixture-board"
         ),

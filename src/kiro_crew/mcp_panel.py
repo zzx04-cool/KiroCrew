@@ -240,22 +240,27 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "AND BLOCKS FOR A READER -- `open_prs`, not a token. A name a "
                 "redactor would mask is refused, because a name is a key the page "
                 "joins its cells by and cannot be rewritten on the way out; the "
-                "refusal tells you which position to rename. A save is a new "
-                "VERSION only when the model, the view or the theme actually "
-                "changed, so re-saving the same layout costs nothing. Values never "
-                "version and never belong in a package. On THIS base a saved page "
-                "is stored but not yet served: once you save, dashboard_write for "
-                "your `agentic` fields is refused with `package_display_pending` "
-                "until the display reads packages (a later change), so do not save "
-                "a page whose fields you still need to write today. Two things "
+                "refusal tells you which position to rename. Values never version "
+                "and never belong in a package. NOTHING IS STORED HERE: this call "
+                "STAGES the page and hands you back a link. Show that link to the "
+                "person, ask whether to keep it, and call dashboard_apply only once "
+                "they say yes -- the page they are reading is untouched until then, "
+                "so offering one costs nothing when the answer is no. The staged "
+                "page expires, and a stale one has to be saved again. The apply is "
+                "what cuts a VERSION, and only when the model, the view or the theme "
+                "actually changed, so re-applying the same layout costs nothing. On "
+                "THIS base an APPLIED page is stored but not yet served: once it is "
+                "applied, dashboard_write for your `agentic` fields is refused with "
+                "`package_display_pending` until the display reads packages (a later "
+                "change), so do not apply a page whose fields you still need to write "
+                "today -- a page left staged refuses nothing. Two things "
                 "still belong to the "
                 "template path -- dashboard_fields lists the TEMPLATE page's "
                 "fields, and dashboard_rollback restores a template version, not "
-                "one of yours -- so re-save the layout you want rather than "
-                "rolling back to reach an earlier one. This call STORES the page; "
-                "a renderer for a saved package is not in force on this base yet, "
-                "so tell the person the page is saved rather than that their tab "
-                "already draws it."
+                "one of yours -- so save and apply the layout you want rather than "
+                "rolling back to reach an earlier one. A renderer for a stored "
+                "package is not in force on this base yet, so tell the person the "
+                "page is staged rather than that their tab already draws it."
             ),
             "inputSchema": {
                 "type": "object",
@@ -359,13 +364,16 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "dashboard_apply",
             "description": (
-                "Keep the page you previewed. This is the answer to the person "
-                "saying yes, and it takes NO arguments on purpose: what it "
-                "installs is the page that was staged, so it cannot differ from "
-                "the one they were shown. The previous version stays on disk, so "
-                "dashboard_rollback can go back to it. Refused with "
-                "`dashboard_locked` while the page is locked (your [DASHBOARD] "
-                "block says LOCKED). While locked you can still preview."
+                "Keep the page that is staged -- the one you previewed with "
+                "dashboard_preview, or the one you composed with dashboard_save. "
+                "This is the answer to the person saying yes, and it is the ONLY "
+                "call that makes either kind of page live. It takes NO arguments on "
+                "purpose: what it installs is the page that was staged, so it "
+                "cannot differ from the one they were shown. For a template the "
+                "previous version stays on disk, so dashboard_rollback can go back "
+                "to it. Refused with `dashboard_locked` while the page is locked "
+                "(your [DASHBOARD] block says LOCKED). While locked you can still "
+                "preview."
             ),
             "inputSchema": {"type": "object", "properties": {}},
         },
@@ -560,7 +568,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             # from. Shortened to a generic failure it would cost a cycle and teach
             # nothing.
             return redact(f"Error: {api_err}")
-        return redact(_render_saved(d.get("saved") or {}))
+        return redact(_render_staged(d.get("staged") or {}, str(d.get("next") or "")))
 
     if name == "dashboard_templates":
         query = args.get("query")
@@ -606,6 +614,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         api_err = d.get("error")
         if api_err:
             return redact(f"Error: {api_err}")
+        # TWO SHAPES, told apart by one key, because the route installs two kinds of
+        # staged page. ``saved`` is the composed package; a template apply carries an
+        # instance version and a template id and never that key.
+        saved = d.get("saved")
+        if isinstance(saved, dict):
+            return redact(_render_saved(saved))
         return redact(
             f"Your crewmate's page is now version {d.get('instance_version')}, "
             f"from template `{d.get('template_id')}`.\n{DASHBOARD_PREVIEW_NOTE}"
@@ -637,27 +651,26 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
 
 
 def _render_saved(saved: dict[str, Any]) -> str:
-    """What landed, and whether it cut a version.
+    """What landed on an APPLY, and whether it cut a version.
 
-    The version sentence is here because a save is the one panel call whose
+    The version sentence is here because an applied package is the one panel
     outcome an agent cannot predict: it composed a page and the STORE decided
     whether that is a new version, by comparing the layout rather than by taking
     the caller's word. Saying "no new version" out loud is what stops an agent
-    reading an unmoved number as a failed save and sending the same package again.
+    reading an unmoved number as a failed write and sending the same package again.
 
-    The last lines sort the three neighbouring verbs into the one that now follows
-    a save and the two that do not, because getting that wrong is expensive in
-    both directions. ``dashboard_write`` DOES fill a saved page's ``agentic``
-    fields: the write path reads the package first and falls back to the template
-    only when no package is bound, so telling an agent to avoid it would steer it
-    off the only verb that fills the fields it just declared. ``dashboard_fields``
-    reads the template instance, and ``dashboard_rollback`` restores an instance
-    version and never reaches this artifact's own, so an agent reaching for
-    either expecting its saved page gets the template's answer.
+    The last lines sort the three neighbouring verbs, because getting that wrong
+    is expensive in both directions. ``dashboard_write`` is refused for an applied
+    package's own fields on this base -- the display does not read packages yet --
+    so the note says which code comes back instead of leaving an agent to read a
+    refusal as a broken write. ``dashboard_fields`` reads the template instance,
+    and ``dashboard_rollback`` restores an instance version and never reaches this
+    artifact's own, so an agent reaching for either expecting its applied page
+    gets the template's answer.
     """
     version = saved.get("version")
     lines = [
-        f"Saved your crewmate's Dashboard page: {saved.get('fields')} field(s) in "
+        f"Applied your crewmate's Dashboard page: {saved.get('fields')} field(s) in "
         f"{saved.get('blocks')} block(s), now at version {version}. The page is "
         "stored, and this package is the model your values are checked "
         "against from now on."
@@ -669,13 +682,54 @@ def _render_saved(saved: dict[str, Any]) -> str:
         )
     lines.append("")
     lines.append(
-        "Note: on this base a saved page is stored but not yet served -- "
+        "Note: on this base a stored page is not yet served -- "
         "dashboard_write for its `agentic` fields is refused with "
         "`package_display_pending` until the display reads packages (a later "
         "change). Do not use dashboard_fields or dashboard_rollback "
         "for this page -- both answer for the template one -- and to get back an "
-        "earlier layout, save it again."
+        "earlier layout, save and apply it again."
     )
+    return "\n".join(lines)
+
+
+def _render_staged(staged: dict[str, Any], note: str) -> str:
+    """What is STAGED, and the question that has to be asked before it goes live.
+
+    The link comes first and the counts second. An agent that just composed a page
+    knows what it declared; what it does not have is the thing to put in front of a
+    person, and burying that under a shape report is how a save turns into an
+    unasked-for change.
+
+    The route's own ``next`` sentence is passed through rather than restated here.
+    It carries the expiry window, which is the gateway's number -- a copy of it in
+    this process is one deploy away from telling an agent to re-save at the wrong
+    time.
+
+    The last line is this base's limit, said once: the staged page answers as the
+    declarations it is, because no renderer for a package is in force here yet. So
+    an agent is told to describe what it composed rather than to promise a drawing
+    the link does not carry.
+    """
+    url = str(staged.get("preview_url") or "")
+    lines = [
+        f"STAGED, not live: {staged.get('fields')} field(s) in "
+        f"{staged.get('blocks')} block(s). Nothing on your crewmate's Dashboard has "
+        "changed yet, and nothing is stored."
+    ]
+    if url:
+        lines.append("")
+        lines.append(f"The staged page reads back at: {url}")
+    if note:
+        lines.append("")
+        lines.append(f"Next: {note}")
+    lines.append("")
+    lines.append(
+        "On this base that link answers the declarations rather than a drawn page -- "
+        "a renderer for a package is not in force yet -- so describe the fields and "
+        "blocks you composed when you ask."
+    )
+    lines.append("")
+    lines.append(DASHBOARD_PREVIEW_NOTE)
     return "\n".join(lines)
 
 

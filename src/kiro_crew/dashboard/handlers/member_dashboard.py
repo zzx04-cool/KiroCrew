@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Final, Mapping
 
 from aiohttp import web
 
@@ -37,6 +37,7 @@ from kiro_crew.dashboard.handlers.members import (
     _member_thread_slot,
 )
 from kiro_crew.dashboard_templates import catalog, instance
+from kiro_crew.dashboard_agentic import PACKAGE_DISPLAY_PENDING
 from kiro_crew.members import MemberSlugError
 from kiro_crew.platform.context import redact_via_context
 
@@ -284,6 +285,29 @@ async def _serve(request: web.Request, slug: str, member: str, slot: str | None)
         # place to get that gate right. `instance.preview_url` builds the PAGE link that
         # reads this: the Members page's Dashboard tab, which asks here with
         # `preview=1` and draws the answer under a preview label.
+        #
+        # A STAGED COMPOSED PACKAGE is asked about first. On this base nothing draws a
+        # package, so previewing one does not hand back a page the tab cannot render
+        # (which fell through to an "unavailable" card and asked the person to approve
+        # something they could not see). It answers the SAME pending refusal the apply
+        # gives -- `package_display_pending`, a plain message -- so the one thing a
+        # person is told is the true one: the page is saved and staged, and the
+        # display that draws packages (#19335) is what a preview and an apply both wait
+        # for. The staged page is left in place; this is a read.
+        staged_package = await _run(lambda: instance.staged_package_preview(slug))
+        if staged_package is not None:
+            return web.json_response(
+                {
+                    "error": (
+                        "this crewmate composed a dashboard page and it is staged, but "
+                        "nothing can draw a composed package on this build yet -- so it "
+                        "cannot be previewed or applied here. The page is kept; a later "
+                        "change adds the display and lifts this"
+                    ),
+                    "code": PACKAGE_DISPLAY_PENDING,
+                },
+                status=409,
+            )
         staged = await _run(lambda: _preview_record(slug))
         if staged is None:
             return web.json_response(
@@ -405,6 +429,167 @@ def _page_safe(value: Any) -> Any:
     return value
 
 
+#: The scope prefix a crewmate's dashboard package is bound with.
+#:
+#: ``bound_to`` is ``crewmate:<slug>`` or ``session:<slot key>``, and this route is
+#: keyed by SLUG -- the slug it already validated. So the binding it may serve is
+#: this one string and nothing else: a session-bound package names a slot, and a
+#: crewmate reaching it would be reaching past its own page.
+_CREWMATE_BINDING: Final[str] = "crewmate:"
+
+
+def package_declared_name_spots(package: Mapping[str, Any]) -> list[str]:
+    """Where *package* declares a name a redactor would mask. Positions, never names.
+
+    THE ONE SCAN over the three name sets a dashboard package carries -- its model's
+    field names, its view's block ids and its theme's token keys -- and the one place
+    the rule lives. Both the write and the read ask it: ``dashboard_save`` refuses a
+    save that trips it, and :func:`_staged_package_body` refuses the whole read. Two
+    copies of this predicate would be two rules, and the first thing the second one
+    would do is drift from this one.
+
+    BOTH CALLERS ARE NEEDED, which is not belt-and-braces. The save keeps a
+    credential out of a page an agent asked for honestly, with a refusal it can act
+    on while the name can still be changed. The read keeps one out of the response
+    whatever put it on disk: a staged page is an ordinary file under
+    ``members/<slug>/dashboard/``, so the save route is not its only writer and a
+    guard that trusted it would be guarding nothing.
+
+    REFUSED RATHER THAN MASKED, at both ends, because every one of these names is a
+    JOIN KEY: a field name ties the model to the blocks that read it, a block id ties
+    a block to the frame, and a theme token is the CSS variable the style
+    references. A redacted key hides nothing -- a declaration is a name, not a value
+    -- and leaves the reference pointing at a key the package does not contain.
+
+    The POSITION comes back and the name does not. A name that needs redacting is not
+    a name to write to a log, and these sentences travel through the gateway's logs;
+    the agent can resolve a position against the package in its own hand.
+
+    The field and token order is the model's sorted key order, which is what the
+    package validator canonicalises to, so an index here is the index the stored
+    package has.
+    """
+    raw_model = package.get("model")
+    raw_view = package.get("view")
+    raw_theme = package.get("theme")
+    model: Mapping[str, Any] = raw_model if isinstance(raw_model, Mapping) else {}
+    view: Mapping[str, Any] = raw_view if isinstance(raw_view, Mapping) else {}
+    theme: Mapping[str, Any] = raw_theme if isinstance(raw_theme, Mapping) else {}
+    raw_types = model.get("types")
+    raw_blocks = view.get("blocks")
+    raw_tokens = theme.get("tokens")
+    types: Mapping[str, Any] = raw_types if isinstance(raw_types, Mapping) else {}
+    blocks = raw_blocks if isinstance(raw_blocks, list) else []
+    tokens: Mapping[str, Any] = raw_tokens if isinstance(raw_tokens, Mapping) else {}
+    spots: list[str] = []
+    for index, name in enumerate(sorted(types), start=1):
+        if isinstance(name, str) and redact_via_context(name) != name:
+            spots.append(f"declared field #{index} of {len(types)}")
+    for index, block in enumerate(blocks, start=1):
+        block_id = block.get("id") if isinstance(block, Mapping) else None
+        if isinstance(block_id, str) and redact_via_context(block_id) != block_id:
+            spots.append(f"the id of view block #{index} of {len(blocks)}")
+    for index, token in enumerate(sorted(tokens), start=1):
+        if isinstance(token, str) and redact_via_context(token) != token:
+            spots.append(f"theme token #{index} of {len(tokens)}")
+    return spots
+
+
+def _staged_package_body(slug: str, staged: Any) -> web.Response:
+    """The page a crewmate COMPOSED but nobody has approved yet, as its declarations.
+
+    THE DECLARATIONS, NOT A DRAWING, and that is this base's limit rather than a
+    choice: nothing here renders a package into a document yet, so a body promising
+    ``rendered_html`` would promise a key it cannot fill. What it carries is what a
+    reader of a package needs -- the model, the view and the theme, plus the counts
+    an agent checks its own compose against -- so the display that reads packages
+    draws this body without the route changing again.
+
+    ``preview: true`` is the key a reader tells this apart by, as on the template
+    preview beside it, and ``instance_version`` stays 0 because staging wrote no
+    version. A reader that saw either move would believe the page had been
+    installed, which is the thing the staging gate exists to prevent.
+
+    SCRUBBED through ``_manifest_text_safe``: the prose is redacted and the KEYS are
+    left exactly as declared. Both halves of that are load-bearing.
+
+    The prose -- ``label``, ``title``, ``description`` -- is agent-authored free
+    text on the same wire as everything else, so it goes through the redactor.
+
+    THE KEYS MUST SURVIVE VERBATIM, because every one of them is a JOIN KEY: a
+    field name ties the model to the blocks that read it, a block id ties a block
+    to the frame, and a theme token is the CSS variable the style references.
+    Redacting a key does not hide anything -- the declaration is already a name,
+    not a value -- and it breaks the document: the key disappears or changes while
+    the reference to it stays, so the body describes a package that cannot render.
+    ``_page_safe`` beside this one is the redactor for RESOLVED VALUES and is wrong
+    here for exactly that reason; it also drops ``worker_session_key`` at any depth,
+    which would silently delete a model field an agent is allowed to declare under
+    that name.
+
+    What keeps a credential out of a KEY is the refusal above it: this read is
+    refused WHOLE when :func:`package_declared_name_spots` finds one, which is the
+    same answer for the same reason -- there is no masked form of a join key that
+    still works. The refusal is asked HERE and not left to ``dashboard_save``,
+    because a staged page is an ordinary file under ``members/<slug>/dashboard/``
+    and the save route is not its only writer: a guard that trusted the write path
+    would be guarding nothing against anything that wrote the file directly.
+    """
+    package = staged.package()
+    if package is None:
+        # Staged bytes that do not parse. Answered as "nothing is staged", which
+        # is the answer the agent can act on: save it again.
+        logger.warning("dashboard: %r's staged package does not parse", slug)
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    if str(package.get("bound_to") or "") != f"{_CREWMATE_BINDING}{slug}":
+        # NOT THIS CREWMATE'S to be shown. A package bound to another crewmate, or to
+        # a session slot, must not be read back here -- and the second is the case a
+        # looser check would miss, since a slot key and a member slug look alike. The
+        # save route stamps the binding from the vetted caller, so this is the
+        # older-staging-file case.
+        logger.warning("dashboard: %r's staged package names another binding", slug)
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    unsafe = package_declared_name_spots(package)
+    if unsafe:
+        # THE WHOLE READ, refused. A declared name a redactor would mask cannot be
+        # masked on the way out -- it is a join key -- so there is no partial answer
+        # here, exactly as there is none for the live package read. Asked of the
+        # DECODED staged file rather than trusted from the save: this file is an
+        # ordinary file under the crewmate's own directory, so whatever wrote it,
+        # the response is the same. The count is logged and the name is not.
+        logger.warning(
+            "dashboard: refusing to serve %r's staged package: %d declared name(s) "
+            "would be redacted on the way to a page",
+            slug,
+            len(unsafe),
+        )
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    return web.json_response(
+        {
+            "state": "live",
+            "preview": True,
+            "instance_version": 0,
+            "package": _manifest_text_safe(
+                {
+                    "bound_to": package.get("bound_to"),
+                    "model": package.get("model"),
+                    "view": package.get("view"),
+                    "theme": package.get("theme"),
+                }
+            ),
+            "fields": len(package["model"]["types"]),
+            "blocks": len(package["view"]["blocks"]),
+            "staged_ms": int(staged.staged_ms),
+        }
+    )
+
+
 def _safe_body(body: dict[str, Any]) -> dict[str, Any]:
     """One wire body with its page halves scrubbed, in place.
 
@@ -439,11 +624,19 @@ def _template_text_safe(text: str) -> str:
 
 
 def _manifest_text_safe(manifest: Any) -> Any:
-    """A manifest's own strings, scrubbed. Keys are left alone.
+    """A manifest's or a package's own strings, scrubbed. Keys are left alone.
 
-    Values only, and recursively, because a manifest's KEYS are field names the
-    loader has already matched against ``^[a-z][a-z0-9_]{0,63}$`` -- a grammar no
-    credential survives -- while ``title`` and ``description`` are free prose.
+    Values only, and recursively, because the KEYS on both sides are structural
+    names rather than data, and redacting a name breaks the document instead of
+    hiding anything: the reference to it stays while the key moves.
+
+    What makes that safe differs by caller, and both are write-side. A manifest's
+    field names the loader has already matched against ``^[a-z][a-z0-9_]{0,63}$``,
+    a grammar no credential survives. A PACKAGE adds theme tokens, which are CSS
+    custom properties -- ``--[a-z][a-z0-9-]{0,63}`` admits a lowercase hyphenated
+    look-alike -- so ``dashboard_save`` scans all three of its name sets and
+    refuses the save outright. Either way nothing credential-shaped reaches a key
+    here, and ``title``, ``label`` and ``description`` are free prose that does.
     """
     if isinstance(manifest, str):
         return redact_via_context(manifest)

@@ -965,3 +965,68 @@ class TestAStoredPageCannotBeEdited:
         assert edited.instance_version == 2
         assert edited.manifest["title"] == "Retitled"
         assert edited.html == PAGE, "a manifest edit moved the page"
+
+
+# --------------------------------------------------------------------------
+# the STAGED composed page: read back for a look, and nothing installed
+# --------------------------------------------------------------------------
+
+
+def _package(**over) -> dict:
+    """A package the store's own gate accepts, bound to this crewmate."""
+    package = {
+        "kind": "dashboard",
+        "bound_to": f"crewmate:{SLUG}",
+        "model": {
+            "types": {
+                "open_prs": {"type": "number", "source": {"agentic": True}, "label": "Open PRs"},
+                "headline": {"type": "text", "source": {"agentic": True}},
+            }
+        },
+        "view": {
+            "blocks": [
+                {"id": "lead", "type": "stat", "fields": ["open_prs"], "title": "Open"},
+                {"id": "note", "type": "list", "fields": ["headline"]},
+            ]
+        },
+        "theme": {"tokens": {"--accent": "oklch(0.7 0.15 150)"}},
+    }
+    package.update(over)
+    return package
+
+
+def _stage_package(package: dict | None = None) -> None:
+    """Stage a composed package for this crewmate, the way a save does."""
+    from kiro_crew.artifact_store.dashboard_package import canonical_package_content
+
+    instance.stage_package_preview(
+        SLUG, content=canonical_package_content(json.dumps(package or _package()))
+    )
+
+
+class TestTheStagedComposedPage:
+    """``dashboard_save`` stages, so the link it hands back has to read back.
+
+    What it reads back on THIS base is the declarations rather than a drawn page:
+    nothing here renders a package into a document yet. These cases pin the half
+    that exists -- the body, the gate, and that nothing was installed -- so the
+    display change that adds the drawing has a contract to fill.
+    """
+
+    async def test_staging_installs_nothing_the_ordinary_read_can_see(self) -> None:
+        """The gate's whole point: the page in force does not move on a save."""
+        _stage_package()
+        async with _client() as client:
+            body = await (await client.get(_q(""))).json()
+        assert "preview" not in body
+        assert body["state"] == instance.STATE_EMPTY
+        assert body["instance_version"] == 0
+
+    async def test_a_staged_template_still_answers_its_own_preview(self) -> None:
+        """Both readers answer None for the other's payload, so one page comes back."""
+        instance.stage_preview(SLUG, template_id="fixture-board")
+        async with _client() as client:
+            body = await (await client.get(_q("", preview=1))).json()
+        assert body["preview"] is True
+        assert body["template"]["id"] == "fixture-board"
+        assert "manifest" in body

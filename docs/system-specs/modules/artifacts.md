@@ -1210,16 +1210,29 @@ than history, so a record written before the check can still be re-themed,
 re-versioned and REBOUND. A revert is exempt for the same reason: it submits a
 past version's whole package and `revert_package` discards the binding in it, so
 the submitted value is one the store was never going to store.
-A crewmate writes its own package through the save route — the `dashboard_save`
+A crewmate composes its own package through the save route — the `dashboard_save`
 MCP tool on `kirocrew-panel` and `POST /api/agent-panel/dashboard/save`
 (`kiro_crew.dashboard.handlers.agent_panel`). The `bound_to` is derived from the
 vetted caller and never read from the request, so a body carrying `bound_to` or
-`kind` is refused; a declared field name or block id a redactor would mask is
-refused too, before anything is written. **One crewmate keeps exactly one
-package:** the save holds a per-binding lock across the lookup and the write, and
-a lookup that cannot prove whether a package already exists is refused rather
-than minting a second artifact. (No renderer serves a saved package on this base
-yet — the save stores it; a reader comes with a later change.)
+`kind` is refused; a declared field name, view block id or theme token key a
+redactor would mask is refused too, before anything is written — every one of
+those names is a join key, so a masked name would break the page rather than
+protect it.
+
+**NOTHING IS STORED BY THE SAVE.** It stages the page behind the same
+preview-ask-apply gate a template goes through, and `dashboard_apply` is the only
+writer of the artifact. The package runs the store's own write gate
+(`canonical_package_content`) at STAGING, so a layout that could never be stored
+is refused while the agent is still composing rather than after a person has
+approved it, and the bytes staged are the bytes applied. **One crewmate keeps
+exactly one package:** the apply holds the staging lock across the staged-page
+selection, the artifact write and the discard, with the store's per-binding lock
+nested inside it — the first makes the page committed the page that was staged,
+the second makes the artifact unique, and a lookup that cannot prove whether a
+package already exists is refused rather than minting a second artifact. (No
+renderer serves an applied package on this base yet — `?preview=1` answers a
+staged package's declarations; a reader that draws one comes with a later
+change.)
 
 The kind is in `ALLOWED_KINDS` and deliberately NOT in
 `USER_SELECTABLE_KINDS`, and [Kind inference](#kind-inference) never returns it:

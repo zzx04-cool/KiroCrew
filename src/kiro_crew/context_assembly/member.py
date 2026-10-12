@@ -334,9 +334,11 @@ _MEMBER_DASHBOARD_ITEM = """
    Feature Preview off (the default) the tab shows your `panel_publish` record; this page
    shows only for readers who turned the preview on. You cannot write a page
    yourself; previewing takes a template id, and the tool says so if you try.
-   `dashboard_save` STORES a page you declare, but on this base a saved page is not
+   `dashboard_save` declares one instead — fields, blocks and theme, never markup —
+   and it goes through the SAME gate: it STAGES the page, nothing is stored, and
+   `dashboard_apply` is for after they say yes. On this base an applied page is not
    yet served: `dashboard_write` for its fields is refused until the display reads
-   packages (a later change), so save one only when you do not need to write its
+   packages (a later change), so apply one only when you do not need to write its
    fields today. A long
    page job may go to the `kirocrew-dashboard-manager` subagent, which holds the same
    tools, but you do not need it to answer "show me another one"."""
