@@ -333,7 +333,15 @@ class TestLeafOnlyPopulationIsRecorded:
     #: tier lists hold ``.vault`` only at the two ``$HOME``-joined spellings,
     #: so the resolved ``config_dir()`` spelling is a third, leaf-only name,
     #: the same hold ``kas`` gets there.
-    EXPECTED: dict[str, int] = {"standard": 269, "cc": 276, "strict": 277}
+    #:
+    #: One more root-level directory, three entries per tier:
+    #:
+    #: * ``engines`` -- the KAS engine bundles ``kirocrew kas install`` lays down
+    #:   (``acp/kas_bundle.py``), sealed read-only like ``playwright-cli`` so a
+    #:   sandboxed session cannot rewrite the engine code and Node runtime its
+    #:   next session runs. At the data-home root beside writable siblings, so
+    #:   leaf-only is the only hold available.
+    EXPECTED: dict[str, int] = {"standard": 272, "cc": 279, "strict": 280}
 
     @pytest.mark.parametrize("tier", TIERS)
     def test_leaf_only_count_has_not_grown(self, tier: str) -> None:

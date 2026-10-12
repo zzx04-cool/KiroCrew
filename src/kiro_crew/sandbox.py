@@ -637,6 +637,13 @@ _CREW_READONLY_LEAVES: tuple[str, ...] = (
     # an owner address-bar launch. The gateway installer runs outside the agent
     # sandbox, so it can still replace the managed copy.
     "playwright-cli",
+    # The KAS engine bundles Kiro Crew installs itself (``acp.kas_bundle``): a
+    # pinned ``@kiro/agent`` tree and the Node runtime that executes it. Same
+    # class as ``playwright-cli``: a sandboxed KAS process must read and execute
+    # this directory, while a write would choose the code every later KAS
+    # session runs. ``kirocrew kas install`` runs in the gateway, outside the
+    # sandbox, so it can still lay down a new version.
+    "engines",
     # The cloud launcher's config. In-sandbox code READS it (the provisioner selector calls
     # ``CloudConfig.load()``, and so does the launch record's legacy fallback, which every
     # ``cloud`` verb reaches through ``LaunchState.load``), and a WRITE would let an
@@ -945,6 +952,9 @@ _CREW_CHILD_READABLE_LEAVES: tuple[str, ...] = (
     # entry here the read gate also fences, so the only one whose exclusion changes
     # what an enforced child can open; the rest are already outside the mask.
     "playwright-cli",
+    # The KAS engine bundle a sandboxed KAS process must read and execute. The
+    # second entry the read gate also fences, for the same reason as the first.
+    "engines",
     # Authorization and lineage records an in-sandbox reader resolves. Read-only
     # sealed for the same reason: a forged entry decides a later grant.
     "apps/.dev-grants.json",
@@ -1540,6 +1550,10 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
     # protects only hosts that happen to have the directory already.
     "panel-templates",
     "playwright-cli",
+    # The KAS engine bundle root, for the ``playwright-cli`` reason: on an install
+    # that has never run ``kirocrew kas install`` the directory is absent, and an
+    # absent target is a seal skipped and a name the agent may create.
+    "engines",
     # The decision log, on the ``profiles`` argument rather than the JSON one.
     # (1) An EMPTY dir means what an ABSENT dir means to its only reader:
     # A reader resolves a day-file by name and skips one that is not there, so no
@@ -1569,6 +1583,7 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
 #: half of a control, so none may be satisfied by a link the governed party planted.
 _CREW_NOFOLLOW_READONLY_DIR_LEAVES: tuple[str, ...] = (
     "playwright-cli",
+    "engines",
     "subagents",
     "member-memory-bindings",
     "decisions",
@@ -1604,6 +1619,11 @@ _DELEGATED_OVERLAP_LEAF_REASONS: "dict[str, tuple[str, str]]" = {
     "playwright-cli": (
         "sealed browser runtime",
         "the agent could replace the browser executable the gateway runs",
+    ),
+    "engines": (
+        "sealed agent engine",
+        "the agent could replace the KAS engine code and Node runtime every later "
+        "session runs",
     ),
     # These two are gateway-owned run records: results stay readable, and agent code must
     # not rewrite the app owner a continuation restores its authorization from. The wording
