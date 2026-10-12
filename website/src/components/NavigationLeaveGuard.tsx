@@ -3,12 +3,20 @@ import { useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { arrivedByFreshNavigation, isTrapEntry, routerEntry, type TrapEntryState } from '../lib/routeHistoryPosition'
 
 /** The mounted page's answer to "may I navigate away from you?". `true` allows
- *  the navigation, `false` keeps the user exactly where they are. */
-export type NavigationLeaveGuard = () => boolean
+ *  the navigation, `false` keeps the user exactly where they are.
+ *
+ *  `to` is the destination address (pathname plus query) when the exit knows
+ *  it -- a rail row, a palette jump, a guarded handler with a `to`. A surface
+ *  that stays mounted at that address holds nothing the navigation can
+ *  destroy, so it may answer `true` without asking: the Crewmates page keeps
+ *  its guided create flow, draft and all, through every `/members?...`
+ *  change. An exit with no known destination (the browser's Back, a history
+ *  step) passes `undefined`, and the guard asks as if the page were leaving. */
+export type NavigationLeaveGuard = (to?: string) => boolean
 
 type Channel = {
   register: (guard: NavigationLeaveGuard) => () => void
-  ask: () => boolean
+  ask: (to?: string) => boolean
   /** Publish whether the page on screen is holding work an exit would destroy.
    *  Separate from `ask` because it must answer WITHOUT prompting: the browser
    *  Back guard needs to know there is something at stake before the user
@@ -84,9 +92,9 @@ export function NavigationLeaveGuardProvider({ children }: { children: React.Rea
     // has already said "stay" must not then be asked about a second draft for a
     // navigation that is no longer going to happen. Iterated over a copy, since a
     // guard's own confirm can unmount a surface and mutate the set.
-    ask: () => {
+    ask: (to) => {
       for (const g of [...guards.current]) {
-        if (g() === false) return false
+        if (g(to) === false) return false
       }
       return true
     },
@@ -133,7 +141,7 @@ export function useRegisterNavigationLeaveGuard(guard: NavigationLeaveGuard) {
   latest.current = guard
   React.useEffect(() => {
     if (!channel) return
-    return channel.register(() => latest.current())
+    return channel.register((to) => latest.current(to))
   }, [channel])
 }
 
@@ -166,8 +174,9 @@ export function usePublishNavigationStake(atStake: boolean) {
 
 const ALWAYS_MAY_LEAVE = () => true
 
-/** Ask the page on screen before an action that navigates away from it. */
-export function useMayLeaveForNavigation(): () => boolean {
+/** Ask the page on screen before an action that navigates away from it. Pass
+ *  the destination when the caller knows it (see `NavigationLeaveGuard`). */
+export function useMayLeaveForNavigation(): (to?: string) => boolean {
   const channel = React.useContext(NavigationLeaveGuardContext)
   return channel?.ask ?? ALWAYS_MAY_LEAVE
 }
@@ -214,7 +223,7 @@ export function useGuardedLeave(): (perform: () => void | Promise<void>, to?: st
   const mayLeave = useMayLeaveForNavigation()
   const isCurrentUrl = useIsCurrentUrl()
   return React.useCallback((perform: () => void | Promise<void>, to?: string) => {
-    if (!(to !== undefined && isCurrentUrl(to)) && !mayLeave()) return
+    if (!(to !== undefined && isCurrentUrl(to)) && !mayLeave(to)) return
     // A returned promise is deliberately not awaited: the gate answers "may this
     // run", and the handler owns its own async failure path (each one already
     // catches and logs).

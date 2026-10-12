@@ -134,7 +134,7 @@ export function usePaletteActions(): PaletteActions {
       resolveInvokableEnter(hasActiveChat, token, { insertToken, newSessionWithToken })(),
     navigate: (route: string) => {
       // A jump to where we already are unmounts nothing, so it must not ask.
-      if (!isCurrentUrl(route) && !mayLeave()) return
+      if (!isCurrentUrl(route) && !mayLeave(route)) return
       navigate(route)
     },
   }), [hasActiveChat, insertToken, newSessionWithToken, navigate, mayLeave, isCurrentUrl])

@@ -634,7 +634,7 @@ export const NavItem = forwardRef(function NavItem({ path, label, icon, active, 
     // dialog — and unmounts nothing, so it keeps its exemption; an unqualified
     // ask would pop a discard-confirm over a click that was never going to
     // destroy anything.
-    if (!onClickOverride && !isCurrentUrl(path) && !mayLeave()) return
+    if (!onClickOverride && !isCurrentUrl(path) && !mayLeave(path)) return
     onClick?.(); (onClickOverride || (() => navigate(path, { replace })))()
   }
   return (
