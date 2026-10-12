@@ -256,7 +256,31 @@ def _url_payload_command(n: int) -> str:
 #: data-consumer exemption. The branch grows a ``(?<!^-)`` guard and its comment states
 #: which terminal ``e`` is the command. Every execute construct it read before is still
 #: read; no other pattern moved.
-_PACKAGE_LINE_BUDGET = 28_864
+#:
+#: Raised again, from 28,864, for ``publish_program_word.py``: the git-publish floor
+#: reads program position on quote-aware shell words, so a push run under a program
+#: word the shell resolves at run time (``"$G"``, ``g?t``, a substitution) is found in
+#: every program position -- after newlines, glued and background separators, inside
+#: compound constructs, behind precommands, dispatchers and redirections -- and judged
+#: by its target when its argv is known, and unverifiable when it is not. Substitution
+#: bodies, comments and each heredoc body are read in their own quote context; a body
+#: that only a sink (``git commit``, ``gh pr create``, ``glab mr create``) reads, or that
+#: ``cat``/``tee`` only writes to a plainly named file, is data beside inert companions,
+#: and a markdown ``*`` bullet in a sink's body is read as ``:`` beside inert companions
+#: and plain runners (``make``/``pytest``/``ruff``/``npm test``/``pre-commit run``). A
+#: runtime publish joined to its program word by a backslash-newline is judged on the
+#: folded source, so a sibling feature push cannot hide it. The reading is a
+#: security-deciding predicate, so it cannot leave the package; it sits in its own module
+#: so ``argv_floor`` stays under the per-module cap (the arithmetic-literal fold moved to
+#: ``shell_normalizer``, which also carries the ``flock -c`` command-string payload the
+#: nested-payload walk judges). No threshold moved.
+#:
+#: Raised to 31,150 so a markdown bullet in a ``gh``/``glab`` body is text beside a
+#: checkout, switch, stash, plain rebase or script run by its path (neither runs a
+#: hook on a body), so ``mkdir`` and ``.github`` paths leave a file-written body data,
+#: and so a redirection target ends at the next operator and a literal ``git`` with a
+#: redirection before ``push`` is judged by its target. No threshold moved.
+_PACKAGE_LINE_BUDGET = 31_150
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
