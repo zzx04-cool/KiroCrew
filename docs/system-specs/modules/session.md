@@ -2748,6 +2748,25 @@ mid-turn compaction, or the post-token recovery
 `/clear` also settle it. A cancelled, empty-response or pre-output exit leaves it
 armed, and a slash command that assembled nothing never settles it.
 
+The debt is in memory, so it is also mirrored onto the session map as the
+mapped sid's `unlanded_sid` marker (`SessionMap.mark_sid_unlanded`, written only
+over the sid the entry already holds, for an `AcpProvider` session; the
+dashboard turn awaits `SessionManager.aflush()` right after arming, so the
+marker is on disk, written off the event loop, before the turn goes out, and a
+failed write fails the turn instead of sending it; cleared by
+`consume_first_turn_history_owed` through `clear_sid_unlanded`). `close_all`
+rewrites the same sid at shutdown and leaves the marker alone. After a restart,
+`SessionMap.get` refuses a sid named by the marker on every backend other than
+kiro-cli. It refuses without repairing the entry, because `get` also runs while
+that session is still live (an export resolving the sid mid-turn), and dropping
+the marker there would let `close_all`'s write-back make the sid resumable. The
+next turn cold-starts and replays the conversation instead of loading a native
+session that never received it; its new sid replaces the old one, and `set` drops
+a marker that names a different sid. This covers every discard-based recovery (the
+poisoned-conversation canary, image-history replay), because each one ends in a
+fresh first turn that arms the debt. kiro-cli ignores the marker: its own `.jsonl`
+check already answers.
+
 **Replayed content carries no image reference.** `_replay_rows` and
 `_recall_rows` — the two row builders behind every history vehicle
 (`build_session_replay` and the thread-history fallback in

@@ -2954,11 +2954,24 @@ class SessionManager:
         or a reset suppresses it, so a pre-output failure the transient path
         re-queues onto the same live session rebuilds history instead of
         replaying bare.
+
+        The debt is in memory and does not survive a restart, so it is also
+        written onto the session map as the mapped sid's unlanded marker
+        (``SessionMap.mark_sid_unlanded``). After a restart ``SessionMap.get``
+        then refuses that sid on a backend it cannot stat, and the next turn
+        cold-starts with the replay instead of loading an empty native session.
+        The write is scheduled, not awaited: the caller awaits :meth:`aflush`
+        before the turn goes out, so the marker is on disk off the event loop.
         """
-        session = self._sessions.get(self._fold_key(key))
+        folded = self._fold_key(key)
+        session = self._sessions.get(folded)
         if session is None:
             return False
         session.first_turn_history_owed = True
+        if _is_acp_provider(session.provider):
+            sid = getattr(getattr(session.provider, "client", None), "_session_id", None)
+            if isinstance(sid, str) and sid:
+                self._session_map.mark_sid_unlanded(folded, sid)
         return True
 
     def first_turn_history_owed_pending(self, key: str) -> bool:
@@ -2975,10 +2988,12 @@ class SessionManager:
         """Settle the FRESH first-turn history debt once a non-slash
         context-bearing turn delivers its history (assembled and accepted) or a
         reset suppresses it."""
-        session = self._sessions.get(self._fold_key(key))
+        folded = self._fold_key(key)
+        session = self._sessions.get(folded)
         if session is None or not session.first_turn_history_owed:
             return False
         session.first_turn_history_owed = False
+        self._session_map.clear_sid_unlanded(folded)
         return True
 
     def consume_replay_suppression(self, key: str) -> bool:

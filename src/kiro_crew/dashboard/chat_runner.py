@@ -10982,7 +10982,12 @@ async def _run_chat(
         # turn is discarded or re-queued, so it leaves the debt armed for the
         # next turn.
         if is_new and not resumed:
-            state.sessions.mark_first_turn_history_owed(session_key)
+            if state.sessions.mark_first_turn_history_owed(session_key) is True:
+                # The debt's on-disk marker must land before the turn does, or a
+                # crash in the debounce window keeps the sid without it. Awaited
+                # off the loop; a failed write fails the turn before it is sent,
+                # and the turn's own finally hands the session back.
+                await state.sessions.aflush()
         # AcpProvider exposes an exact bool; ``is True`` prevents a truthy mock
         # or fallback from authorizing replay. KAS and every future backend fail
         # closed even if they populate a familiar ``tool_name``.

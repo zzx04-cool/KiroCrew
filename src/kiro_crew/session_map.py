@@ -116,6 +116,19 @@ MIRROR_OPT_OUT_FLAG = "mirror_opt_out"
 #: it is consumed, by the first cold start that honours it.
 SUPPRESS_REPLAY_FLAG = "suppress_replay"
 
+#: The sid of a fresh native session that still owes its Kiro Crew history: the
+#: session was mapped at creation, but no turn has delivered the history to it yet
+#: (``SessionManager.mark_first_turn_history_owed`` writes it, the settle in
+#: ``consume_first_turn_history_owed`` clears it). It is the on-disk copy of that
+#: in-memory debt, because the debt itself is gone after a restart. kiro-cli needs
+#: no copy: :meth:`SessionMap.get` already prunes a sid whose ``.jsonl`` holds no
+#: turn. A backend whose transcript this process cannot stat would instead be
+#: resumed, and a ``session/load`` that succeeds on the unused session hands the
+#: next turn no history at all. So ``get`` refuses a sid named here, without
+#: touching the entry. Scoped to the sid rather than a bare flag, so a
+#: later mapping of a different sid can never inherit the verdict.
+UNLANDED_SID_FIELD = "unlanded_sid"
+
 # Highest explicit DM generation acknowledged before its first provider turn.
 # Stored on the stable bucket entry so repeated /new commands cost one integer,
 # not one immortal map row per empty generation.
@@ -1045,6 +1058,17 @@ class SessionMap:
         # itself, so skip the file check rather than pruning a live session.
         # An absent label means kiro-cli, so normalize before comparing.
         if (entry.get("provider") or PROVIDER_LABEL_DEFAULT) != PROVIDER_LABEL_DEFAULT:
+            # The one thing this process does know about such a sid: whether a
+            # turn ever delivered its history (:data:`UNLANDED_SID_FIELD`). One
+            # that never did is refused, so the next cold start replays the
+            # conversation instead of loading an empty native session. The entry
+            # is left as it is: ``get`` also runs while that session is still
+            # live (an export resolving the sid mid-turn), and repairing the entry
+            # there would drop the marker that ``close_all``'s write-back of the
+            # same sid relies on to keep refusing it after a restart.
+            if sid and entry.get(UNLANDED_SID_FIELD) == sid:
+                logger.info("Session %s never landed its history — not resuming %s", sid, key)
+                return None
             return sid
         sessions_dir = _kiro_sessions_dir()
         if sid and (sessions_dir / f"{sid}.json").exists():
@@ -1283,6 +1307,8 @@ class SessionMap:
         key = canonical_key(key)
         existing = self._data.get(key)
         if existing:
+            if existing.get(UNLANDED_SID_FIELD) not in (None, sid):
+                existing.pop(UNLANDED_SID_FIELD, None)
             existing["sid"] = sid
             if provider:
                 existing["provider"] = provider
@@ -1332,6 +1358,34 @@ class SessionMap:
             self._save()
             return True
         return False
+
+    @_guarded
+    def mark_sid_unlanded(self, key: str, sid: str) -> bool:
+        """Record that *sid*, *key*'s current mapping, has not received its history.
+
+        Written only over the sid the entry already holds: a stale caller naming an
+        older or newer sid writes nothing, so the marker can never describe a
+        session other than the mapped one. Returns whether it was written. See
+        :data:`UNLANDED_SID_FIELD`.
+        """
+        entry = self._data.get(canonical_key(key))
+        if not sid or not entry or entry.get("sid") != sid:
+            return False
+        if entry.get(UNLANDED_SID_FIELD) == sid:
+            return True
+        entry[UNLANDED_SID_FIELD] = sid
+        self._save()
+        return True
+
+    @_guarded
+    def clear_sid_unlanded(self, key: str) -> bool:
+        """Drop *key*'s unlanded marker once a turn has delivered the history."""
+        entry = self._data.get(canonical_key(key))
+        if not entry or UNLANDED_SID_FIELD not in entry:
+            return False
+        entry.pop(UNLANDED_SID_FIELD, None)
+        self._save()
+        return True
 
     def get_discarded_sid(self, key: str) -> str:
         """Return the last sid dropped from *key* by any path, or ''.

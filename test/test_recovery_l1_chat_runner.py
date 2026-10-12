@@ -439,6 +439,8 @@ def _l1_state(tmp_path):
     # slash-command gates peek liveness with an await.
     sessions.is_provider_alive = AsyncMock(return_value=False)
     sessions.record_failure = AsyncMock()
+    # Awaited by a turn that arms the FRESH first-turn debt.
+    sessions.aflush = AsyncMock(return_value=None)
     sessions.check_context_usage = MagicMock()
     sessions.stop_generation = MagicMock(return_value=0)
     state = DashboardState(
