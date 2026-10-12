@@ -691,6 +691,10 @@ export default function SidePanel({
   // points cannot drift on WHERE the shell starts — that cwd is the whole point
   // of the affordance.
   const openProjectTerminal = useCallback(() => { openTerminal({ cwd: projectDir }) }, [openTerminal, projectDir])
+  // The note an "Open in <app>" fallback leaves (see the banner below the tab
+  // bodies). Held here rather than in the Files tab, which that fallback takes
+  // out of view.
+  const [externalTerminalNote, setExternalTerminalNote] = useState<string | null>(null)
   const openMenuItem = useCallback((kind: ViewKind | 'terminal') => {
     const run = () => {
       if (kind === 'terminal') openProjectTerminal()
@@ -1283,6 +1287,20 @@ export default function SidePanel({
       {/* Body — render every doc/terminal tab mounted (hidden when inactive) so
           xterm sessions and editor scroll state survive tab switches; category
           views mount only when active (cheap + query-driven). */}
+      {/* The Files tab's "Open in <app>" fell back to the integrated terminal,
+          which this panel has just brought to the front; the note lives here so
+          it outlives the Files tab going out of view. In flow above the bodies,
+          not layered over them, so it never covers a shell's first lines. No
+          hand-off: the adjacent chat composer can hold unsent text. */}
+      {externalTerminalNote && (
+        <div className="shrink-0 px-3 pt-3">
+          <ErrorNotice
+            message={externalTerminalNote}
+            onDismiss={() => setExternalTerminalNote(null)}
+            testId="side-panel-external-terminal-fallback"
+          />
+        </div>
+      )}
       {/* Content area: left + top border (square corner) so the border wraps
           only the content, NOT the tab strip above (which stays borderless). */}
       <div className="flex-1 min-h-0 relative">
@@ -1411,6 +1429,7 @@ export default function SidePanel({
                   // per-project shortcut, or the button promises a shell this
                   // panel will not open.
                   onOpenTerminal={terminalEnabled && !isWithheld('terminal') ? openProjectTerminal : undefined}
+                  onExternalTerminalFailed={setExternalTerminalNote}
                 />
               </div>
             )
