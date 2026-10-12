@@ -43,7 +43,7 @@ from kiro_crew.dashboard.state import (
     _ChatSlot,
 )
 from kiro_crew.history import ConversationLog
-from kiro_crew.testing.wait import async_wait_until
+from kiro_crew.testing.wait import async_wait_until, await_until, until_parked
 
 
 def _provider_mock() -> AsyncMock:
@@ -11735,7 +11735,7 @@ class TestRunChatRefusalFallback:
         slot._refusal_client_pick_epoch = 0  # epoch unmoved when restore starts
 
         restore_task = _asyncio.create_task(_restore_refusal_fallback(slot, client))
-        await _asyncio.wait_for(restore_entered.wait(), timeout=5)
+        await await_until(restore_entered, what="the restore reaching set_model")
 
         async def _alias_pick() -> None:
             # The pick handler's essential moves, under the SAME session
@@ -11750,8 +11750,8 @@ class TestRunChatRefusalFallback:
         for _ in range(10):  # let the pick reach the lock (or, unfixed, run)
             await _asyncio.sleep(0)
         release_restore.set()
-        await _asyncio.wait_for(restore_task, timeout=5)
-        await _asyncio.wait_for(pick_task, timeout=5)
+        await await_until(restore_task, what="the restore finishing")
+        await await_until(pick_task, what="the aliased pick finishing")
 
         client.set_model.assert_awaited_once_with("fable-5")
         assert client.served_model == "user-picked", (
@@ -11797,7 +11797,7 @@ class TestRunChatRefusalFallback:
         client.set_model = AsyncMock(side_effect=_gated_set_model)
 
         swap_task = _asyncio.create_task(_refusal_fallback_swap(slot, client, "opus-test"))
-        await _asyncio.wait_for(swap_entered.wait(), timeout=5)
+        await await_until(swap_entered, what="the swap reaching set_model")
 
         async def _alias_pick() -> None:
             # The pick handler's essential moves, under the SAME session
@@ -11812,8 +11812,8 @@ class TestRunChatRefusalFallback:
         for _ in range(10):  # let the pick reach the lock (or, unfixed, run)
             await _asyncio.sleep(0)
         release_swap.set()
-        assert await _asyncio.wait_for(swap_task, timeout=5) == "fable-5"
-        await _asyncio.wait_for(pick_task, timeout=5)
+        assert await await_until(swap_task, what="the swap finishing") == "fable-5"
+        await await_until(pick_task, what="the aliased pick finishing")
 
         # The retry ran; the next genuine turn restores. The record must be
         # dropped on the epoch mismatch without touching the model.
@@ -12120,7 +12120,7 @@ class TestRunChatRefusalFallback:
             )
         finally:
             _held.release()
-        assert await _asyncio.wait_for(swap_task, timeout=5) == "fable-5"
+        assert await await_until(swap_task, what="the swap finishing") == "fable-5"
         assert (
             slot._refusal_fallback_session_key == _turn_key
         ), "the swap must stamp the binding it ran under"
@@ -12161,7 +12161,7 @@ class TestRunChatRefusalFallback:
             )
         finally:
             _held.release()
-        await _asyncio.wait_for(restore_task, timeout=5)
+        await await_until(restore_task, what="the restore finishing")
         # Once inside the lock, the rebind guard rules: the record belongs to
         # the recorded session, and ``client`` now serves the rebound one —
         # the restore must DROP the record, never move the rebound session's
@@ -12677,8 +12677,6 @@ class TestRunChatRefusalFallback:
         """End to end through the real refuse -> swap -> enqueue -> drain path: a
         correction queued after the drain spawned the replay cancels it at the
         consume seam, and the correction runs next."""
-        import asyncio as _asyncio
-
         from kiro_crew.acp.types import STOP_REASON_REFUSAL
         from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
 
@@ -12711,7 +12709,7 @@ class TestRunChatRefusalFallback:
         assert replay is not None, "the refusal replay was not dispatched"
         # The correction lands after the drain spawned the replay, before it runs.
         slot.queue_insert(0, "actually do the other thing", kind="")
-        await _asyncio.wait_for(replay, timeout=5)
+        await await_until(replay, what="the refusal replay finishing")
         await await_successor(slot, replay)
 
         assert [p for p in prompts if "hello" in p] == [prompts[0]], "the replay ran"
@@ -12726,8 +12724,6 @@ class TestRunChatRefusalFallback:
         barrier, and no shared preparation holds turns back, so an armed
         synthesis starts, as it would after any finished turn, and the cycle's
         chat_done is left to it."""
-        import asyncio as _asyncio
-
         state = self._make_state_for_run_chat(tmp_path, monkeypatch)
         from kiro_crew.dashboard.chat_utils import SYNTHESIS_CLEAR
 
@@ -12750,7 +12746,7 @@ class TestRunChatRefusalFallback:
         slot._pending_synthesis = True
 
         await _run_chat(state, slot, "retry me", _replay=frozenset({ReplayFamily.CONTENT_FILTER}))
-        await _asyncio.wait_for(slot.task, timeout=5)
+        await await_until(slot.task, what="the slot's turn finishing")
 
         synthesis.assert_awaited_once()
         assert chat_done_frames(state) == []
@@ -12946,7 +12942,7 @@ class TestRunChatEarlyExitHandOff:
         first = await self._run(state, slot, "answer me")
         await await_successor(slot, first)
         for task in list(state._background_tasks):
-            await asyncio.wait_for(task, timeout=5)
+            await await_until(task, what="a background task finishing")
 
         title.assert_awaited_once()
         state.refresh_slot_source_status.assert_called_once_with(slot.key)
@@ -13084,7 +13080,7 @@ class TestRunChatEarlyExitHandOff:
         slot.queue_insert(0, "do X please", kind="")
 
         runner = asyncio.ensure_future(self._run(state, slot, "answer me"))
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await await_until(entered, what="the turn reaching its gate")
         first = slot.task
         first.cancel()
         await asyncio.sleep(0)
@@ -13227,9 +13223,9 @@ class TestRunChatEarlyExitHandOff:
         except RuntimeError:
             assert hold == "setup"
         assert slot.task is not None, "the send was stranded on an idle slot"
-        await asyncio.wait_for(slot.task, timeout=5)
+        await await_until(slot.task, what="the slot's turn finishing")
         while slot.task is not None and not slot.task.done():
-            await asyncio.wait_for(slot.task, timeout=5)
+            await await_until(slot.task, what="the slot's turn finishing")
 
         ran = [p for p in prompts if "sent during the read" in p or "held entry" in p]
         assert len(ran) == 2 and "sent during the read" in ran[0], prompts
@@ -13312,16 +13308,22 @@ class TestRunChatEarlyExitHandOff:
                 resp.prepare = AsyncMock()
                 resp.write = AsyncMock(side_effect=written.append)
                 monkeypatch.setattr(openai_compat.web, "StreamResponse", lambda: resp)
-                await asyncio.wait_for(
-                    openai_compat._stream_response(MagicMock(), state, slot, "id1", "m", 0, False),
-                    timeout=5,
+                await await_until(
+                    asyncio.ensure_future(
+                        openai_compat._stream_response(
+                            MagicMock(), state, slot, "id1", "m", 0, False
+                        )
+                    ),
+                    what="the error stream response finishing",
                 )
                 body = b"".join(written).decode()
                 assert "server_error" in body and '"finish_reason": "stop"' not in body, body
             else:
-                response = await asyncio.wait_for(
-                    openai_compat._blocking_response(state, slot, "id1", "m", 0, False),
-                    timeout=5,
+                response = await await_until(
+                    asyncio.ensure_future(
+                        openai_compat._blocking_response(state, slot, "id1", "m", 0, False)
+                    ),
+                    what="the error blocking response finishing",
                 )
                 assert response.status == 500
                 assert json.loads(response.text)["error"]["type"] == "server_error"
@@ -13361,7 +13363,7 @@ class TestRunChatEarlyExitHandOff:
         with pytest.raises(OSError, match="store unavailable"):
             await self._run(state, slot, "/workflow nightly")
         assert slot.task is not None, "the queued message was held"
-        await asyncio.wait_for(slot.task, timeout=5)
+        await await_until(slot.task, what="the slot's turn finishing")
 
         assert sum("summarize the PR" in p for p in prompts) == 1, prompts
         errors = [m.get("content", "") for m in slot.messages if m.get("role") == "error"]
@@ -14971,16 +14973,10 @@ class TestFolderCRUD:
                 client.patch(f"/api/chat/folders/{b['id']}", json={"parent_id": a["id"]})
             )
 
-            async def _both_queued() -> None:
-                # _folders_lock is a LoopBoundLock; the waiter queue
-                # lives on this loop's inner asyncio.Lock.
-                inner = state._folders_lock._bound()
-                while len(getattr(inner, "_waiters", None) or ()) < 2:
-                    await asyncio.sleep(0.01)
-
             # Both requests have passed their pre-lock validation against the
-            # SAME pre-state and are now waiting on the store.
-            await asyncio.wait_for(_both_queued(), timeout=5)
+            # SAME pre-state and are now waiting on the store. _folders_lock is a
+            # LoopBoundLock; until_parked reads this loop's inner asyncio.Lock.
+            await until_parked(state._folders_lock, count=2)
             gate.set()
             r1, r2 = await asyncio.gather(t1, t2)
             await holder
@@ -23188,7 +23184,7 @@ class TestRunChatModelFallback:
             assert not task.done()
         finally:
             slot._model_pick_lock.release()
-        candidate = await asyncio.wait_for(task, timeout=2)
+        candidate = await await_until(task, what="the fallback swap finishing")
         assert candidate == "fallback-model"
         assert slot._active_fallback_model == "fallback-model"
 
@@ -23237,7 +23233,7 @@ class TestRunChatModelFallback:
             assert not task.done()
         finally:
             _session_lock.release()
-        candidate = await asyncio.wait_for(task, timeout=2)
+        candidate = await await_until(task, what="the fallback swap finishing")
         assert candidate == "fallback-model"
         assert slot._active_fallback_model == "fallback-model"
 
@@ -25620,7 +25616,7 @@ class TestCloseBroadcastDurability:
 
         async with TestClient(TestServer(_make_app(state))) as client:
             close = asyncio.get_running_loop().create_task(client.delete("/api/chat/slots/s1"))
-            await asyncio.wait_for(seen.wait(), timeout=5.0)
+            await await_until(seen, what="the broadcast firing")
             assert "save" in calls and calls.index("save") < calls.index("broadcast")
             assert "s1" not in state._slots
             close.cancel()

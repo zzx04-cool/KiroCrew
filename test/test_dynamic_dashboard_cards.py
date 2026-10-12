@@ -10,6 +10,22 @@ import pytest
 
 from kiro_crew.crew_main_contract import CARD_FIELDS
 from kiro_crew.dashboard.dynamic_cards import CardBudget, CardPublisher, normalize_card
+from kiro_crew.testing.wait import await_until
+
+
+async def _parked() -> None:
+    """Hold a fake generation or turn open until the code under test cancels it.
+
+    Unbounded on purpose: every test that parks one also awaits the cancellation it
+    expects (``cancelling`` / ``cancelled`` / the worker itself) under the lost-run
+    bound, so a park that is never cancelled fails by name there, not here.
+    """
+    await asyncio.Event().wait()
+
+
+async def _worker_done(service) -> None:
+    """Wait for the lifecycle service's current worker to finish, under the lost-run bound."""
+    await await_until(service.worker, what="the card worker finishing")
 
 
 @pytest.fixture(autouse=True)
@@ -198,7 +214,7 @@ async def test_one_inflight_latest_event_survives_and_removal_wins(explicit_remo
 
     async def generate(entry):
         entered.set()
-        await asyncio.wait_for(release.wait(), 2)
+        await await_until(release, what="the test's release gate")
         return {"html": "<p>old</p>", "data": {}}
 
     publisher = CardPublisher(
@@ -211,7 +227,7 @@ async def test_one_inflight_latest_event_survives_and_removal_wins(explicit_remo
     publisher.notify("one", current["one"], "binding", "question")
     task = asyncio.create_task(publisher.run_ready())
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await await_until(entered, what="the generation starting")
         publisher.notify("one", current["one"], "binding", "completed")
         assert await publisher.run_ready() == 0
         assert publisher.read("one")["status"] == "generating"
@@ -222,7 +238,7 @@ async def test_one_inflight_latest_event_survives_and_removal_wins(explicit_remo
             assert await publisher.run_ready() == 0
     finally:
         release.set()
-        await asyncio.wait_for(task, 2)
+        await await_until(task, what="the parked task finishing")
     assert publisher.read("one") is None
     assert list(publisher.attempts) == [0]
     assert publisher.last_attempt == {"binding": 0}
@@ -273,7 +289,7 @@ async def test_inflight_old_generation_cannot_publish_over_replacement(change):
 
     async def generate(entry):
         entered.set()
-        await asyncio.wait_for(release.wait(), 2)
+        await await_until(release, what="the test's release gate")
         return {"html": "old occupant", "data": {}}
 
     publisher = CardPublisher(
@@ -287,7 +303,7 @@ async def test_inflight_old_generation_cannot_publish_over_replacement(change):
     original = publisher.entries["one"]
     task = asyncio.create_task(publisher.run_ready())
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await await_until(entered, what="the generation starting")
         publisher.notify(
             "one",
             "replacement" if change == "owner" else "owner",
@@ -300,7 +316,7 @@ async def test_inflight_old_generation_cannot_publish_over_replacement(change):
         assert publisher.read("one")["card"] is None
     finally:
         release.set()
-        await asyncio.wait_for(task, 2)
+        await await_until(task, what="the parked task finishing")
     assert publisher.active is None
     assert publisher.entries["one"] is replacement
     assert replacement.pending
@@ -572,23 +588,23 @@ async def test_cancelled_turn_invalidates_old_card_after_same_key_recreation(
     async def turn():
         started.set()
         try:
-            await asyncio.wait_for(asyncio.Event().wait(), 5)
+            await _parked()
         except asyncio.CancelledError:
             cancelling.set()
-            await asyncio.wait_for(release.wait(), 5)
+            await await_until(release, what="the test's release gate")
             retired.append("done", "Cancelled")
 
     task = asyncio.create_task(turn())
     try:
-        await asyncio.wait_for(started.wait(), 5)
+        await await_until(started, what="the turn starting")
         # Close removes the registry owner before awaiting its cancelled turn.
         state._slots.pop("one")
         task.cancel()
-        await asyncio.wait_for(cancelling.wait(), 5)
+        await await_until(cancelling, what="the cancellation reaching the generator")
         replacement = _ChatSlot("one")
         state._slots["one"] = replacement
         release.set()
-        await asyncio.wait_for(task, 5)
+        await await_until(task, what="the parked task finishing")
         # This removal path sends a full snapshot, not a card invalidation.
         snapshots = []
         state.push_slots_update = lambda: snapshots.append(True)
@@ -604,7 +620,7 @@ async def test_cancelled_turn_invalidates_old_card_after_same_key_recreation(
         release.set()
         if not task.done():
             task.cancel()
-        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        await await_until(asyncio.gather(task, return_exceptions=True), what="the turn settling")
 
 
 @pytest.mark.parametrize("invalidate", ["empty", "incognito", "temporary", "executor", "worker"])
@@ -681,7 +697,7 @@ async def test_edit_boundary_preserves_card_until_real_rewrite(
             )
             assert response.status == (200 if commit else 409)
         if slot.task is not None:
-            await asyncio.wait_for(slot.task, 2)
+            await await_until(slot.task, what="the slot's turn finishing")
         assert service.publisher.entries.get(slot.key) is entry
         assert (await service.read(slot))["card"] == (None if commit else entry.payload)
         assert not any(call.args[0] == "dashboard_card" for call in frames.call_args_list)
@@ -706,7 +722,7 @@ async def test_generation_is_session_scoped_bounded_and_get_is_free(lifecycle, m
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "error")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     first = await service.read(slot)
     for _ in range(10):
         assert await service.read(slot) == first
@@ -740,7 +756,7 @@ async def test_model_input_and_published_output_cross_the_registered_redaction_s
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     result = await service.read(slot)
     assert result["card"] is not None
     for boundary in (prompts[0], result["card"]["html"], result["card"]["data"]["lede"]):
@@ -1013,7 +1029,7 @@ async def test_model_input_omits_a_message_whose_markup_splits_a_labelled_creden
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert prompts and "A" * 40 not in prompts[0]
     assert "aws_secret_access_key" not in prompts[0]
     assert "Release evidence attached" in prompts[0]
@@ -1050,7 +1066,7 @@ async def test_maximum_previous_card_leaves_room_for_escaped_recent_evidence(
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     first = (await service.read(slot))["card"]
     # A maximum-size layout is kept whole. The sentences are the model's only data now,
     # so the escape-heavy bulk that must still leave room for evidence is the layout.
@@ -1058,7 +1074,7 @@ async def test_maximum_previous_card_leaves_room_for_escaped_recent_evidence(
     assert first["data"]["lede"] == "Ready"
     slot.messages = [{"role": "assistant", "content": 'New evidence 界 "\\\n\x01' * 500}]
     service.notify(slot, "completed")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert len(prompts) == 2
     assert all(len(prompt) <= MAX_INPUT_CHARS for prompt in prompts)
     context = json.loads(prompts[1][len(card_lifecycle._ROOT_PROMPT) :])
@@ -1093,10 +1109,10 @@ async def test_invalid_data_only_result_preserves_publication_and_charges_attemp
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     previous = await service.read(slot)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     rejected = await service.read(slot)
     assert rejected["status"] == "failed"
     for field in ("card", "published_at", "content_event_at"):
@@ -1104,7 +1120,7 @@ async def test_invalid_data_only_result_preserves_publication_and_charges_attemp
     assert service.publisher.next_delay() is None
     assert len(service.publisher.attempts) == 2
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert (await service.read(slot))["card"]["data"]["lede"] == "Better"
     assert len(service.publisher.attempts) == 3
 
@@ -1132,12 +1148,12 @@ async def test_source_invalidation_and_failed_update_never_republish_old_content
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert (await service.read(slot))["card"] is not None
     if invalidate == "rewrite":
         state.conversation_log.generation += 1
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     result = await service.read(slot)
     assert result["card"] is None
     assert result["published_at"] is None
@@ -1166,7 +1182,7 @@ async def test_derivation_guards_before_and_after_model_call(lifecycle, monkeypa
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "assistant")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert (await service.read(slot))["card"] is None
 
 
@@ -1227,7 +1243,7 @@ async def test_remote_executor_revokes_completed_and_read_cards(
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     if transition == "after":
         assert (await service.read(slot))["card"] is not None
         slot.executor = "remote"
@@ -1275,7 +1291,7 @@ async def test_enabling_seeds_open_sessions_without_a_get(lifecycle, monkeypatch
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.set_enabled(True)
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert calls == ["dashboard:one"]
     assert (await service.read(slot))["status"] == "published"
 
@@ -1290,15 +1306,15 @@ async def test_disable_cancels_inflight_without_refunding_budget(lifecycle, monk
     async def generate(*args, **kwargs):
         entered.set()
         try:
-            await asyncio.wait_for(asyncio.Event().wait(), 2)
+            await _parked()
         finally:
             cancelled.set()
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(entered.wait(), 2)
+    await await_until(entered, what="the generation starting")
     service.set_enabled(False)
-    await asyncio.wait_for(cancelled.wait(), 2)
+    await await_until(cancelled, what="the cancellation reaching the generator")
     with pytest.raises(asyncio.CancelledError):
         await service.worker
     assert len(service.publisher.attempts) == 1
@@ -1313,7 +1329,7 @@ async def test_latest_event_is_not_lost_while_layout_is_generating():
 
     async def generate(entry):
         entered.set()
-        await asyncio.wait_for(release.wait(), 2)
+        await await_until(release, what="the test's release gate")
         return {"html": "<p data-dashboard-field=next></p>", "data": {"next": "review"}}
 
     publisher = CardPublisher(
@@ -1327,11 +1343,11 @@ async def test_latest_event_is_not_lost_while_layout_is_generating():
     publisher.notify("one", owner, "session-one", "started")
     task = asyncio.create_task(publisher.run_ready())
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await await_until(entered, what="the generation starting")
         publisher.notify("one", owner, "session-one", "completed")
     finally:
         release.set()
-        await asyncio.wait_for(task, 2)
+        await await_until(task, what="the parked task finishing")
     assert publisher.read("one")["stale"] is True
     assert publisher.entries["one"].pending is True
     now.value = 120
@@ -1366,7 +1382,7 @@ async def test_eviction_or_toggle_cannot_reset_session_cooldown():
 @pytest.mark.asyncio
 async def test_timeout_releases_the_only_permit_and_keeps_last_good_card():
     async def blocked(entry):
-        await asyncio.wait_for(asyncio.Event().wait(), 2)
+        await _parked()
 
     publisher = CardPublisher(
         blocked, lambda entry: True, lambda key: None, budget=CardBudget(debounce=0, timeout=0.01)
@@ -1394,11 +1410,11 @@ async def test_rewrite_discards_previous_layout_and_reads_current_disk_rows(life
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     state.conversation_log.generation += 1
     state.conversation_log.rows = [{"role": "assistant", "content": "Replacement evidence"}]
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert "obsolete secret result" not in prompts[1]
     assert "Tests failed" not in prompts[1]
     assert "Replacement evidence" in prompts[1]
@@ -1422,7 +1438,7 @@ async def test_real_history_locks_and_card_get_authority(lifecycle, monkeypatch,
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 3)
+    await _worker_done(service)
 
     class Request(dict):
         app = {"state": state}
@@ -1451,25 +1467,25 @@ async def test_rapid_toggle_waits_for_cancel_and_shutdown_does_not_respawn(lifec
         calls.append(1)
         entered.set()
         try:
-            await asyncio.wait_for(asyncio.Event().wait(), 2)
+            await _parked()
         finally:
             cancelling.set()
-            await asyncio.wait_for(release.wait(), 2)
+            await await_until(release, what="the test's release gate")
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(entered.wait(), 2)
+    await await_until(entered, what="the generation starting")
     old_worker = service.worker
     try:
         service.set_enabled(False)
-        await asyncio.wait_for(cancelling.wait(), 2)
+        await await_until(cancelling, what="the cancellation reaching the generator")
         service.set_enabled(True)
         assert service.worker is old_worker
         assert service.restart_after_cancel
     finally:
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(old_worker, 2)
+            await await_until(old_worker, what="the cancelled worker settling")
     # The restarted worker must wait out the SAME session's cooldown.
     restarted = service.worker
     assert restarted is not old_worker
@@ -1477,7 +1493,7 @@ async def test_rapid_toggle_waits_for_cancel_and_shutdown_does_not_respawn(lifec
     assert len(service.publisher.attempts) == 1
     restarted.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(restarted, 2)
+        await await_until(restarted, what="the restarted worker settling")
     assert service.worker is restarted
     assert service.publisher.active is None
     assert not state._background_tasks
@@ -1509,7 +1525,9 @@ async def test_gateway_live_config_owns_cost_opt_in(monkeypatch):
     _register_config_watch(app, state, initial)
     assert state._dynamic_cards is None
     _kick_config_watch(app, state)
-    await asyncio.wait_for(asyncio.gather(*state._background_tasks), 2)
+    await await_until(
+        asyncio.gather(*state._background_tasks), what="the background tasks finishing"
+    )
     assert state._dynamic_cards is None
     updated = KiroCrewConfig()
     updated.dashboard.dynamic_dashboard_cards = True
@@ -1608,8 +1626,10 @@ async def test_initial_enabled_activation_is_deferred_and_seeds_restored_session
     assert not constructions
     _kick_config_watch(app, state)
     assert not constructions, "the optional import must be deferred out of the boot stack"
-    await asyncio.wait_for(asyncio.gather(*state._background_tasks), 2)
-    await asyncio.wait_for(service.worker, 2)
+    await await_until(
+        asyncio.gather(*state._background_tasks), what="the background tasks finishing"
+    )
+    await _worker_done(service)
     assert constructions == [state]
     assert (await service.read(slot))["card"]["html"] == "<p>restored</p>"
     state.set_dynamic_cards_enabled(False)
@@ -1664,7 +1684,9 @@ async def test_optional_card_activation_failure_does_not_disable_config_watching
         _background_tasks=set(),
     )
     _kick_config_watch(app, state)
-    await asyncio.wait_for(asyncio.gather(*state._background_tasks), 2)
+    await await_until(
+        asyncio.gather(*state._background_tasks), what="the background tasks finishing"
+    )
     watcher.start.assert_awaited_once_with(initial=initial)
 
 
@@ -1685,15 +1707,15 @@ async def test_config_cleanup_cancels_card_worker_without_respawning(lifecycle, 
 
     async def generate(*args, **kwargs):
         entered.set()
-        await asyncio.wait_for(asyncio.Event().wait(), 2)
+        await _parked()
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     app = web.Application()
     _register_config_watch(app, state, None)
     service.notify(slot, "done")
-    await asyncio.wait_for(entered.wait(), 2)
+    await await_until(entered, what="the generation starting")
     shutdown = next(cb for cb in app.on_cleanup if cb.__name__ == "_config_watch_shutdown")
-    await asyncio.wait_for(shutdown(app), 2)
+    await await_until(asyncio.ensure_future(shutdown(app)), what="the config-watch shutdown")
     assert not service.enabled
     assert service.worker.done()
     assert not state._background_tasks
@@ -1797,7 +1819,7 @@ async def test_a_long_run_of_tool_rows_does_not_empty_the_evidence_window(lifecy
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert len(prompts) == 1 and "Build a release" in prompts[0]
     assert (await service.read(slot))["status"] == "published"
 
@@ -1825,7 +1847,7 @@ async def test_card_scanning_runs_off_the_gateway_loop(lifecycle, monkeypatch):
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert set(seen) == {"_evidence_rows", "_redact_card_output"}
     assert all(thread is not loop_thread for thread in seen.values())
 
@@ -1984,7 +2006,7 @@ async def _card_context(service, slot, monkeypatch):
 
     monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
     service.notify(slot, "done")
-    await asyncio.wait_for(service.worker, 2)
+    await _worker_done(service)
     assert len(prompts) == 1
     return json.loads(prompts[0][len(card_lifecycle._ROOT_PROMPT) :])
 

@@ -153,7 +153,6 @@
  6 test_darwin_native_provider_reap.py
  1 test_darwin_spawn_marker.py
  4 test_dashboard_approval.py
-22 test_dashboard_chat.py
  5 test_dashboard_chat_rewind.py
  1 test_dashboard_cron_run_guard.py
  1 test_dashboard_execution_retention.py
@@ -164,7 +163,6 @@
  8 test_dashboard_source_link_unlink.py
 12 test_dashboard_state_ws.py
  2 test_dashboard_status_snapshot.py
-23 test_dashboard_updates_coverage.py
  1 test_decisions_compaction_hook.py
  1 test_decisions_gate.py
  1 test_decisions_integration.py
@@ -185,7 +183,6 @@
  2 test_discord.py
  3 test_discord_approval_press_race_13539.py
  2 test_discord_sessions.py
-52 test_dynamic_dashboard_cards.py
  2 test_e2e_ci_scheduling.py
  1 test_e2e_smoke.py
  5 test_eager_spawn.py
