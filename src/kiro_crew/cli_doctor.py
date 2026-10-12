@@ -74,7 +74,6 @@ from kiro_crew.acp.client import KIRO_CLI_BIN
 from kiro_crew.acp.kas_transport import (
     KAS_RELAY_ENGINE,
     build_kas_argv,
-    build_kas_bundle_argv,
 )
 
 # The one skill-view count ceiling, enforced in the projection and reused as the
@@ -1590,7 +1589,7 @@ def _report_kas_bundle(issues: list[str]) -> None:
     operator to install a binary nothing will use. Crew is the auth owner
     unconditionally, so the vault row is the only credential row.
     """
-    from kiro_crew.acp import kas_bundle
+    from kiro_crew.agent_sdk import kas_bundle
 
     installed = kas_bundle.installed_bundle()
     if installed is None:
@@ -1599,9 +1598,7 @@ def _report_kas_bundle(issues: list[str]) -> None:
         issues.append("agent.kas_bundle is on but no KAS engine bundle is installed")
         return
     print(f"  bundle:      ✅ KAS {installed.version}, Node {installed.node_version or '?'}")
-    print(
-        f"  spawn:       {' '.join(build_kas_bundle_argv(str(installed.node_bin), str(installed.acp_server)))}"
-    )
+    print(f"  spawn:       {' '.join(kas_bundle.bundle_spawn_argv(installed))}")
     print("  auth owner:  Kiro Crew vault (the only owner on this route)")
     try:
         from kiro_crew.auth.bridge import describe_vault_identity, vault_holds_identity

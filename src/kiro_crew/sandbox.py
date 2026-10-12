@@ -1622,8 +1622,7 @@ _DELEGATED_OVERLAP_LEAF_REASONS: "dict[str, tuple[str, str]]" = {
     ),
     "engines": (
         "sealed agent engine",
-        "the agent could replace the KAS engine code and Node runtime every later "
-        "session runs",
+        "the agent could replace the KAS engine code and Node runtime every later " "session runs",
     ),
     # These two are gateway-owned run records: results stay readable, and agent code must
     # not rewrite the app owner a continuation restores its authorization from. The wording

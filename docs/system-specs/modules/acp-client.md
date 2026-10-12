@@ -2903,8 +2903,9 @@ engaged for this backend and KAS is excluded from
 **KAS bundle route: the same harness, no kiro-cli.** `agent.kas_bundle = true`
 makes `KasHarness.resolve_spawn` spawn the engine from Kiro Crew's OWN install
 instead of kiro-cli's relay. `kirocrew kas install` (`cli_kas.py` →
-`acp/kas_bundle.py`) fetches a manifest from `agent.kas_bundle_url`
-(`<base>/kas/latest.json` → `<base>/kas/<version>/manifest.json`), picks this
+`acp/kas_bundle.py`) fetches the pinned version's manifest from `agent.kas_bundle_url`
+(`<base>/kas/<version>/manifest.json`; there is no "current" pointer, because the
+release's pin is the only version anything asks for), picks this
 host's engine tarball (`platforms[<os>-<arch>]`; Mac is `darwin-universal`) and
 Node archive (`node.builds[<os>-<arch>]`, one binary per architecture), transfers
 both through `asset_downloader.download_to` (https-only, same-host redirects,
@@ -2925,8 +2926,7 @@ only; never read from config). A manifest whose `node` is the string
 the remedy. `--from DIR` installs from a local manifest and artifacts (offline,
 mirrors, development). The publishing side is `scripts/kas_bundle_publish.py`:
 engine tarballs in, official Node builds from nodejs.org verified against that
-release's `SHASUMS256.txt`, manifest out, optional `aws s3 cp` with
-`latest.json` uploaded last. The harness reads the flag off the loop and, when
+release's `SHASUMS256.txt`, manifest out, optional `aws s3 cp`. The harness reads the flag off the loop and, when
 on, resolves `kas_bundle.installed_bundle()`; nothing installed is an
 `AcpRuntimeError` naming `kirocrew kas install`, never a fallback to the relay —
 the operator chose the route, and a silent relay spawn would make a kiro-cli

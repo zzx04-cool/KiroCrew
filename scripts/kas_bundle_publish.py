@@ -10,11 +10,10 @@ against that release's ``SHASUMS256.txt`` -- and writes the manifest
     <out>/kas/<version>/kas-*.tar.zst        (copied)
     <out>/kas/<version>/node-v<N>-*.{tar.xz,zip}
     <out>/kas/<version>/manifest.json
-    <out>/kas/latest.json
 
-With ``--s3 s3://<bucket>`` the same tree is uploaded with the ``aws`` CLI,
-``latest.json`` last so a reader never sees a pointer to a half-uploaded
-release. The script never reads a credential itself; the CLI resolves its own.
+With ``--s3 s3://<bucket>`` the same tree is uploaded with the ``aws`` CLI. The
+script never reads a credential itself; the CLI resolves its own. Nothing points
+at a "current" release: each Kiro Crew release pins the one version it runs.
 
 Why a Node per architecture when the engine's Mac build is universal: Node
 ships no universal binary, so ``node.builds`` is keyed by ``<os>-<arch>`` and
@@ -34,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -67,16 +67,25 @@ def ref(path: Path) -> dict:
 
 
 def fetch(url: str, dest: Path) -> None:
+    # Every url this script opens is NODE_DIST + a path it assembled from a
+    # validated version and a fixed archive name; refuse anything else so a
+    # future caller cannot hand it a file:// or foreign host.
+    if not url.startswith(NODE_DIST + "/"):
+        sys.exit(f"refusing to fetch outside {NODE_DIST}: {url}")
     if dest.exists():
         return
     print(f"  GET {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=600) as resp, open(tmp, "wb") as out:
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- host pinned to NODE_DIST above, https only, and every byte is checked against SHASUMS256.txt
+    resp = urllib.request.urlopen(url, timeout=600)
+    with resp, open(tmp, "wb") as out:
         shutil.copyfileobj(resp, out)
     tmp.replace(dest)
 
 
 def node_builds(version: str, out_dir: Path) -> dict[str, dict]:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        sys.exit(f"Node version must look like 22.23.3, got {version!r}")
     parts = tuple(int(x) for x in version.split("."))
     if parts < NODE_MIN:
         sys.exit(f"Node {version} is below the engine's floor {'.'.join(map(str, NODE_MIN))}")
@@ -130,9 +139,6 @@ def upload(out_root: Path, version: str, s3_base: str, *, dry_run: bool) -> None
     release = out_root / "kas" / version
     files = sorted(p for p in release.iterdir() if p.is_file())
     cmds = [["aws", "s3", "cp", str(p), f"{s3_base}/kas/{version}/{p.name}"] for p in files]
-    cmds.append(
-        ["aws", "s3", "cp", str(out_root / "kas" / "latest.json"), f"{s3_base}/kas/latest.json"]
-    )
     for cmd in cmds:
         print("  $", " ".join(cmd))
         if not dry_run:
@@ -167,12 +173,7 @@ def main() -> None:
         "node": {"version": args.node_version, "builds": builds},
     }
     (release / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    (args.out / "kas" / "latest.json").write_text(
-        json.dumps({"version": args.version, "manifest": f"kas/{args.version}/manifest.json"})
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"Wrote {release / 'manifest.json'} and {args.out / 'kas' / 'latest.json'}")
+    print(f"Wrote {release / 'manifest.json'}")
     print("Pin it in src/kiro_crew/acp/kas_pin.py (after testing):")
     print(f'  KAS_PIN_VERSION = "{args.version}"')
     print(f'  KAS_PIN_MANIFEST_SHA256 = "{sha256_of(release / "manifest.json")}"')
