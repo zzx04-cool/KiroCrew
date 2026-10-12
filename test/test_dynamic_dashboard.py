@@ -717,36 +717,61 @@ class TestTheFoldScope:
         an event, which reads as an empty fold."""
         assert dashboard_feed.scope_for("nope") == ""
 
-    def test_every_manifest_fold_name_has_a_scope(self) -> None:
+    def test_every_manifest_fold_name_is_keyed_or_read_as_a_tree(self) -> None:
         """A template may declare any of them, so a name the manifest accepts and
-        this cannot key would be a dashboard that never fills."""
-        from kiro_crew.dashboard_templates.manifest import FOLD_NAMES
+        nothing can reach would be a dashboard that never fills.
 
-        for name in FOLD_NAMES:
-            assert dashboard_feed.scope_for(name), name
-
-    def test_the_manifest_does_not_accept_a_fold_it_cannot_reach(self) -> None:
-        """The other half of the ratchet above, stated as the thing that must stay true
-        while a key kind has no reader.
-
-        A TREE-keyed fold is registered in the projection kernel but has no bus scope
-        and, on this base, no read path either -- its reader lives with the page host.
-        So it must not be a name the manifest ACCEPTS: a binding the save gate admits
-        and the feed can neither key nor read is a block that only ever draws the stale
-        band. The exclusion is in `manifest.FOLD_NAMES`, not in the kernel's registry,
-        so the fold stays registered for the key-kind machinery while being unbindable.
-
-        This is what keeps the check above honest rather than exempted: when the read
-        path lands beside the fold, the tree set joins `FOLD_NAMES` and `scope_for`
-        gains a tree answer together, and this test is what fails if only one of the
-        two arrives.
+        There are TWO ways to reach one, and a tree fold has no scope by design: it
+        joins the logs of many slots, so its value is stale when any member's log grows
+        and there is no key an event could carry to say which. It is read instead
+        (``read_tree_projection``, on a page load and on a refetch), which
+        ``member_dashboard_fields.LivePage`` does. So the invariant is reachability, not
+        a scope -- a bare scope check calls the one fold with a reader unreachable, and
+        a fold in neither set still fails here.
         """
         from kiro_crew.crew_log.projection import TREE_PROJECTION_NAMES
         from kiro_crew.dashboard_templates.manifest import FOLD_NAMES
 
-        assert TREE_PROJECTION_NAMES, "no tree fold is registered; this test guards none"
-        for name in TREE_PROJECTION_NAMES:
-            assert name not in FOLD_NAMES, name
+        for name in FOLD_NAMES:
+            assert dashboard_feed.scope_for(name) or name in TREE_PROJECTION_NAMES, name
+
+    def test_a_tree_fold_the_manifest_accepts_has_a_reader(self) -> None:
+        """The other half of the ratchet above, and the half that moves with this change.
+
+        A TREE-keyed fold is registered in the projection kernel and has no bus scope by
+        design, so the ONLY way a block bound to one ever fills is a read. While there
+        was no read path, the name was withheld from `manifest.FOLD_NAMES` -- a binding
+        the save gate admits and the feed can neither key nor read is a block that only
+        ever draws the stale band.
+
+        The read path lands here, so the name joins the gate's set, and the invariant
+        turns into its positive form: every tree fold the gate accepts must have a
+        reader that resolves it. Stated as two concrete things rather than as a flag,
+        because a flag can be set while neither is true -- the kernel's read function
+        exists, and the page host actually calls it.
+        """
+        import inspect
+
+        from kiro_crew.crew_log import projection
+        from kiro_crew.dashboard.handlers import member_dashboard_fields as mdf
+        from kiro_crew.dashboard_templates.manifest import FOLD_NAMES
+
+        assert projection.TREE_PROJECTION_NAMES, "no tree fold is registered; this test guards none"
+        for name in projection.TREE_PROJECTION_NAMES:
+            assert name in FOLD_NAMES, (
+                f"{name} is a tree fold with a read path, so the save gate must accept "
+                "a block binding it"
+            )
+            # No scope, which is WHY it needs a read: a tree joins the logs of many
+            # slots, so no event key can say which one moved it.
+            assert dashboard_feed.scope_for(name) == "", name
+
+        # THE READER, named: the kernel's read function, and the page host that calls it.
+        assert callable(projection.read_tree_projection)
+        assert "read_tree_projection" in inspect.getsource(mdf.LivePage._read_trees), (
+            "LivePage._read_trees is the tree folds' only production reader; a tree "
+            "fold the gate accepts with nothing reading it fills from nowhere"
+        )
 
 
 class TestThePathWalk:

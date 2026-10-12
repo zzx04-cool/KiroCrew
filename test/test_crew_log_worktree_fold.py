@@ -38,6 +38,7 @@ from kiro_crew import dashboard_feed
 from kiro_crew import dashboard_types as dt
 from kiro_crew.crew_log import projection
 from kiro_crew.crew_log.entry_types import WORK_ENTRY_TYPE
+from kiro_crew.crew_log.errors import CrewLogError
 from kiro_crew.crew_log.schema import Entry
 from kiro_crew.crew_log.session_tree import fold_citations
 from kiro_crew.dashboard_templates import manifest
@@ -189,36 +190,69 @@ def test_the_fold_is_lazy_with_a_stated_reason_and_no_warm_path() -> None:
     assert FOLD not in projection.EAGER_SESSION_FOLD_NAMES
 
 
-def test_the_binding_gate_does_NOT_admit_the_tree_yet() -> None:
-    """The fold is registered and the placement rules are generalized, and a block still
-    cannot bind it HERE -- on purpose.
+def test_a_block_can_bind_the_tree_by_name() -> None:
+    """THE GAP, closed: the binding gate admits the fold name.
 
-    ``manifest.FOLD_NAMES`` is what decides whether a block's ``source.fold``
-    validates, and admitting this name needs the other half: something that produces
-    the value. A tree fold has no bus scope, and on this base no read path either --
-    its reader belongs with the page host that draws it. A binding admitted now would
-    be one the feed can neither key nor read, so the block would only ever draw the
-    stale band, and the dashboard reachability ratchet would be passing an unreachable
-    name.
-
-    So the name is withheld from the union until the read lands beside it. That is one
-    edit in ``manifest.py`` when it does, and ``test_dynamic_dashboard``'s two fold-scope
-    tests pin both directions so the admission and the reader cannot arrive apart.
+    ``manifest.FOLD_NAMES`` is what decides whether a block's ``source.fold`` validates,
+    and it is the union of the kernel's key-kind sets. Before the third set was in that
+    union a tree block was refused however correct ``fold_citations`` was.
     """
-    assert FOLD not in manifest.FOLD_NAMES
+    assert FOLD in manifest.FOLD_NAMES
     assert manifest.FOLD_NAMES == (
-        frozenset(projection.SESSION_FOLD_NAMES) | frozenset(projection.SLOT_PROJECTION_NAMES)
+        frozenset(projection.SESSION_FOLD_NAMES)
+        | frozenset(projection.SLOT_PROJECTION_NAMES)
+        | frozenset(projection.TREE_PROJECTION_NAMES)
     )
-    # Registered all the same: the key-kind machinery and `fold_citations`' second
-    # caller are what this change ships, and both want the fold to exist.
-    assert FOLD in projection.TREE_PROJECTION_NAMES
-    assert FOLD in projection.FOLD_NAMES
 
 
-def test_the_catalogue_does_not_advertise_a_fold_a_block_cannot_bind() -> None:
-    """The catalogue is what a composing agent reads to decide what to bind, so it must
-    not offer a name the save gate would refuse. Derived from the same set the gate
-    uses rather than restated, which is why it cannot drift from the test above."""
+def test_a_v3_package_block_binding_the_tree_validates() -> None:
+    """END TO END on the binding half: a real manifest, parsed by the real loader.
+
+    Two fields, because the two halves of a tree block fail differently: one binds the
+    board list (the rows a renderer walks) and one binds a scalar beside it. A path this
+    fold does not render is still refused, which is what proves the acceptance is about
+    THIS fold's shape rather than about any string getting through.
+    """
+    parsed = manifest.parse_manifest(
+        {
+            "id": "fleet-tree",
+            "version": 1,
+            "title": "Fleet",
+            "description": "every board, and which board it hangs under",
+            "source": "user",
+            "fields": {
+                "boards": {"type": "array", "source": {"fold": FOLD, "path": "boards"}},
+                "roots": {"type": "array", "source": {"fold": FOLD, "path": "roots"}},
+                "cycles": {"type": "number", "source": {"fold": FOLD, "path": "cycles"}},
+            },
+        }
+    )
+    assert parsed.folds == frozenset({FOLD})
+    assert parsed.fields["boards"].path == "boards"
+
+    # And the catalog agrees those three paths are real, which is the other half of a
+    # binding: the gate says the FOLD exists, the catalog says the PATH does.
+    shape = _catalog_entry(FOLD).shape
+    assert _at(shape, "boards") == {"type": "array"}
+    assert _at(shape, "roots") == {"type": "array"}
+    # ``integer`` rides along on every number the catalog types: a cycle count is whole,
+    # and a reader that must have a whole number cannot tell that from ``number`` alone.
+    assert _at(shape, "cycles") == {"type": "number", "integer": True}
+    assert _at(shape, "not_a_field") is None
+
+
+def test_the_catalogue_advertises_the_fold_now_that_a_reader_exists() -> None:
+    """The counterpart of the withheld state, and the reason the flag is DERIVED.
+
+    ``advertised`` is what a composing agent reads to decide what it may bind, and the
+    generator computes it from two sets: the editorial one
+    (``INTERNAL_PROJECTION_NAMES``) and the mechanical one (``manifest.FOLD_NAMES``, the
+    set the save gate accepts a binding from). A tree fold sat outside the second one
+    while it had no read path, so the catalogue correctly offered nothing. The read path
+    lands here, the name joins the gate's set, and the same expression turns the flag
+    over -- nothing hand-edited, so the catalogue cannot advertise a binding the gate
+    would refuse, in either direction.
+    """
     import json
     from pathlib import Path
 
@@ -234,8 +268,16 @@ def test_the_catalogue_does_not_advertise_a_fold_a_block_cannot_bind() -> None:
         ).read_text(encoding="utf-8")
     )["folds"]
     entry = next(f for f in folds if f["name"] == FOLD)
-    assert entry["advertised"] is False
-    assert entry["mode"] == "tree", "still catalogued as a tree, just not offered"
+    assert entry["advertised"] is True, (
+        "the fold has a reader and the gate admits its name, so the catalogue must "
+        "offer it; regenerate with `python3 scripts/fold_catalogue.py --write`"
+    )
+    assert entry["mode"] == "tree"
+    # ADVERTISED WITH A READER, which is the pairing this test exists for: the flag is
+    # only honest because something resolves the value. That reader is the page host's
+    # tree read, and the two assertions below are the two halves it needs.
+    assert FOLD in manifest.FOLD_NAMES
+    assert FOLD in projection.TREE_PROJECTION_NAMES
 
 
 def test_the_catalog_keys_the_fold_by_tree_and_not_by_slot() -> None:
@@ -262,6 +304,22 @@ def test_the_fold_has_no_bus_scope_and_that_is_the_design() -> None:
     assert dashboard_feed.scope_for(FOLD) == ""
     assert dashboard_feed.scope_for("work") != ""
     assert dashboard_feed.scope_for("status") != ""
+
+
+def test_a_tree_read_refuses_a_fold_of_another_key_kind() -> None:
+    """The unit resolver is the third kind's own route, so it refuses the other kinds.
+
+    Answering for a slot fold here would fold it over a whole tree's units and serve
+    several boards' entries as one board's.
+    """
+    for name in ("work", "workstreams", "status", "outline", "not-a-fold"):
+        with pytest.raises(CrewLogError):
+            projection.tree_fold_units(ROOT, name)
+    # And the probe CAN pass, so the refusals are not read from a route that raises on
+    # everything: the tree fold's own name resolves (to an empty closure in this home).
+    units, dropped = projection.tree_fold_units(ROOT, FOLD)
+    assert units == ()
+    assert dropped == 0
 
 
 # --------------------------------------------------------------------------- #

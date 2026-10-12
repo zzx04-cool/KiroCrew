@@ -910,7 +910,7 @@
     {
       "name": "worktree",
       "mode": "tree",
-      "advertised": false,
+      "advertised": true,
       "affects": [
         "work/recorded"
       ],

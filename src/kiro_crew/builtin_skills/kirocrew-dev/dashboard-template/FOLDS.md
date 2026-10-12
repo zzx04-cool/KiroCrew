@@ -47,7 +47,7 @@ it: bind a tree fold today and the block shows the stale band until then.
 | `agentic` | slot | Which dashboard fields this crewmate filled itself, with what value, of what declared type and when |
 | `mistakes` | slot | Which dashboard writes of this crewmate's were refused, grouped by reason and field, how often, and what worked instead |
 | `workstreams` | slot | Every workstream this crewmate is running: each board's goal and counts, each task's result, and what each task cost its own worker session |
-| `worktree` *(internal)* | tree | The shape of a fleet: every work board the tree reaches, which board each one hangs under, and which boards are its roots |
+| `worktree` | tree | The shape of a fleet: every work board the tree reaches, which board each one hangs under, and which boards are its roots |
 
 ## `status`
 

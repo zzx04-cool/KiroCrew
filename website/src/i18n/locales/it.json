@@ -18450,7 +18450,8 @@
       "profile_dashboard_lock_hint": "Finché è bloccato, {{name}} non può sostituire la sua dashboard con un altro layout né ripristinarne uno precedente. I valori mostrati continuano ad aggiornarsi.",
       "profile_dashboard_lock_failed": "Impossibile bloccare la dashboard. È ancora sbloccata. Riprova.",
       "profile_dashboard_unlock_failed": "Impossibile sbloccare la dashboard. È ancora bloccata. Riprova.",
-      "profile_dashboard_lock_unreadable": "Impossibile leggere se la dashboard è bloccata. Prova ad aggiornare la pagina."
+      "profile_dashboard_lock_unreadable": "Impossibile leggere se la dashboard è bloccata. Prova ad aggiornare la pagina.",
+      "dashboard_values_stale": "I valori in tempo reale non si aggiornano più: questi sono gli ultimi ricevuti."
     },
     "tasksCapacityCard": {
       "title": "Attività e capacità",

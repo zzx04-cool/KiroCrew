@@ -18450,7 +18450,8 @@
       "profile_dashboard_lock_hint": "Enquanto bloqueado, {{name}} não pode substituir o painel por outro layout nem restaurar um anterior. Os valores exibidos continuam a ser atualizados.",
       "profile_dashboard_lock_failed": "Não foi possível bloquear o painel. Ele continua desbloqueado. Tente novamente.",
       "profile_dashboard_unlock_failed": "Não foi possível desbloquear o painel. Ele continua bloqueado. Tente novamente.",
-      "profile_dashboard_lock_unreadable": "Não foi possível ler se o painel está bloqueado. Tente recarregar a página."
+      "profile_dashboard_lock_unreadable": "Não foi possível ler se o painel está bloqueado. Tente recarregar a página.",
+      "dashboard_values_stale": "Os valores ao vivo pararam de atualizar, portanto estes são os últimos recebidos."
     },
     "tasksCapacityCard": {
       "title": "Tarefas e capacidade",

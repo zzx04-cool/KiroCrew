@@ -18450,7 +18450,8 @@
       "profile_dashboard_lock_hint": "Mientras está bloqueado, {{name}} no puede reemplazar su panel por otro diseño ni restaurar uno anterior. Los valores que muestra siguen actualizándose.",
       "profile_dashboard_lock_failed": "No se pudo bloquear el panel. Sigue desbloqueado. Inténtalo de nuevo.",
       "profile_dashboard_unlock_failed": "No se pudo desbloquear el panel. Sigue bloqueado. Inténtalo de nuevo.",
-      "profile_dashboard_lock_unreadable": "No se pudo leer si el panel está bloqueado. Intenta actualizar la página."
+      "profile_dashboard_lock_unreadable": "No se pudo leer si el panel está bloqueado. Intenta actualizar la página.",
+      "dashboard_values_stale": "Los valores en vivo dejaron de actualizarse, así que estos son los últimos recibidos."
     },
     "tasksCapacityCard": {
       "title": "Tareas y capacidad",

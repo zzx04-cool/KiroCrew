@@ -17926,7 +17926,8 @@
       "profile_dashboard_lock_hint": "锁定期间，{{name}} 无法将其仪表板换成其他布局，也无法恢复旧布局。上面的数值会继续更新。",
       "profile_dashboard_lock_failed": "无法锁定仪表板。它仍未锁定。请重试。",
       "profile_dashboard_unlock_failed": "无法解锁仪表板。它仍处于锁定状态。请重试。",
-      "profile_dashboard_lock_unreadable": "无法读取仪表板是否已锁定。 尝试刷新页面。"
+      "profile_dashboard_lock_unreadable": "无法读取仪表板是否已锁定。 尝试刷新页面。",
+      "dashboard_values_stale": "实时数据已停止更新，以下是最后收到的数值。"
     },
     "tasksCapacityCard": {
       "title": "任务与容量",
