@@ -207,6 +207,18 @@ _PRINTENV_AWS_SECRET_PATTERN = r"(?<![\w-])printenv(?!\w).*AWS_" + _AWS_SECRET_V
 # whitespace is, so the two cannot both fire on one spelling.
 _NETCAT_EXEC_PATTERN = r"(?<![\w.-])(?<!\w=)nc\s+-e"
 
+# The operand scan the two ``local-destructive`` rm rows share: every word after
+# ``rm -rf `` up to the invocation's end.  A command boundary is a ``; & | )``
+# that ends a word (whitespace/end after it), or a ``; | ) # &`` that starts one
+# -- so a separator INSIDE a word (``build#1``, ``'a;b'``) or a redirect
+# (``2>&1``, ``&>``, ``>&``) does not hide a later operand.  It also stops at the
+# next ``rm -rf `` so each invocation is scanned once (linear in the command).
+# The boundary test lives in a lookahead: an alternation in the quantified body
+# itself would fail ``is_safe_user_regex`` and DISABLE the rows.
+_RM_RF_OPERAND_SCAN = (
+    r"rm -rf (?:(?!rm -rf |\n|(?<![<>])[;&|)](?=\s|\Z)|(?<=\s)(?:[;|)#]|&(?!>)))[\s\S])*"
+)
+
 # ``AWS_CONFIG_FILE`` / ``AWS_SHARED_CREDENTIALS_FILE`` hold a PATH, not a
 # secret, so the global secret scrub leaves both in an agent child's environment (the AWS CLI
 # and SDKs read them); ``acp.client._apply_pod_home_remap`` drops both for a pod child.
@@ -1316,20 +1328,55 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-rm-rf-root",
-        pattern="rm -rf /.*",
+        # Scoped to the filesystem ROOT ITSELF, not every ``/``-rooted path: deleting
+        # a NAMED child (``rm -rf /tmp/x``, ``sudo rm -rf /opt/old``) is routine.
+        # The lookahead fires only when an operand is root itself or a whole-root
+        # expansion -- end / whitespace / a separator or redirect (``; & | ) # < >``)
+        # / quote / a second ``/`` / a segment STARTING with a glob, brace, or
+        # dot-glob (``/*``, ``/[!.]*``, ``/{*,.*}``, ``/.*``) / a dot-only segment /
+        # a ``..`` segment anywhere in the operand (``/tmp/../*``) -- so ``/tmp``
+        # does not match.  EVERY operand of the invocation is checked
+        # (``_RM_RF_OPERAND_SCAN``), so ``rm -rf /tmp/x 2>&1 /`` denies.  Via
+        # ``re.search`` over the raw command AND the command-shape deny-views, which
+        # canonicalize a re-quoted spelling (``rm -rf "/"`` -> ``rm -rf /``) but do
+        # NOT expand ``~``/``$HOME`` or the ``-fr`` flag order -- so this row and its
+        # ``~`` sibling keep the literal ``rm -rf`` contract.
+        pattern=(
+            _RM_RF_OPERAND_SCAN + r"(?<!\S)/(?="
+            r"[\s/)#;&|'\"<>]|\Z|\.?[*?\[{]|\.\.?(?=[\s/)#;&|'\"<>]|\Z)"
+            r"|[^\s;&|)#'\"<>]*/\.\.(?=[\s/)#;&|'\"<>]|\Z))"
+        ),
         category="local-destructive",
         description=(
-            "Blocks recursive force-deletion rooted at the filesystem root (rm -rf /...), which "
-            "can wipe the entire operating system and all data."
+            "Blocks recursive force-deletion of the filesystem root itself (rm -rf /, "
+            "rm -rf /*, rm -rf /.., and the like), which can wipe the entire operating "
+            "system and all data. Deleting a named directory under root (rm -rf /tmp/x) "
+            "is ordinary cleanup and is allowed."
         ),
     ),
     DeniedCommandRule(
         id="local-destructive-rm-rf-home",
-        pattern="rm -rf ~.*",
+        # The ``~`` sibling, narrowed the same way: deny a home ITSELF (``~``,
+        # ``~+``, ``~user``) or a whole-home expansion (``~/``, ``~//``, a
+        # glob/brace/dot-glob segment ``~*``/``~/*``/``~/{*,.*}``/``~/.*``, a
+        # dot-only segment, or a ``..`` anywhere in the operand) in ANY operand,
+        # allow a named child (``~/.cache``).  The alternation is a non-capturing
+        # group: a TOP-LEVEL ``|`` fails ``is_safe_user_regex`` and would DISABLE
+        # the row.
+        pattern=(
+            _RM_RF_OPERAND_SCAN + r"(?<!\S)~[^\s/;&|)#'\"<>*?\[{]*(?:"
+            r"(?=[\s;&|)#'\"<>]|\Z)"
+            r"|[*?\[{]"
+            r"|/(?=[\s;&|)#'\"/<>]|\Z|\.?[*?\[{]|\.\.?(?=[\s;&|)#/'\"<>]|\Z))"
+            r"|(?=[^\s;&|)#'\"<>]*/\.\.(?:[\s;&|)#/'\"<>]|\Z))"
+            r")"
+        ),
         category="local-destructive",
         description=(
-            "Blocks recursive force-deletion of the user home directory (rm -rf ~...), which "
-            "would destroy all personal files and config."
+            "Blocks recursive force-deletion of the user home directory itself (rm -rf ~, "
+            "rm -rf ~/, rm -rf ~/*, and the like), which would destroy all personal files "
+            "and config. Deleting a named directory under home (rm -rf ~/.cache/foo) is "
+            "ordinary cleanup and is allowed."
         ),
     ),
     DeniedCommandRule(
@@ -1807,7 +1854,22 @@ _LEGACY_RULE_ID_BY_PATTERN: dict[str, str] = {
     # against an older catalog pins; the row itself is anchored to the command
     # token (``_NETCAT_EXEC_PATTERN``) and stays force-pinnable under that pin.
     "nc -e.*": "reverse-shell-nc",
+    # The pre-narrowing spellings of the two ``local-destructive`` rm rows. The
+    # rows still exist (narrowed to the dir itself), so an administrator ceiling
+    # pinning the old pattern text must keep forcing them on; without the alias
+    # the pin resolves to None, is dropped, and a user opt-out could then loosen
+    # a tightest-wins ceiling for ``rm -rf /`` / ``rm -rf ~``.
+    "rm -rf /.*": "local-destructive-rm-rf-root",
+    "rm -rf ~.*": "local-destructive-rm-rf-home",
 }
+
+# A pin in one of these pre-narrowing spellings ALSO keeps enforcing its own text
+# as a deny regex, so the ceiling still refuses everything it refused when the
+# pin was written (``rm -rf /etc``), not only what the narrowed row covers.  It
+# rides the pin-id set as ``<prefix><pattern>``; ``compute_effective_denied``
+# turns it back into the regex.
+_LEGACY_TEXT_PIN_PREFIX = "legacy-pattern:"
+_LEGACY_TEXT_PINS: frozenset[str] = frozenset({"rm -rf /.*", "rm -rf ~.*"})
 
 
 def _rule_id_for_pattern(pattern: str) -> "str | None":
@@ -1847,6 +1909,8 @@ def _resolved_pin_ids(pins: "Iterable[str]", component: str) -> set[str]:
             )
             continue
         resolved.add(rule_id)
+        if pin in _LEGACY_TEXT_PINS:
+            resolved.add(_LEGACY_TEXT_PIN_PREFIX + pin)
     return resolved
 
 
@@ -1956,6 +2020,8 @@ def compute_effective_denied(
     for rule in rules:
         if (not disable_all and rule.id not in disabled) or rule.id in pins:
             out.append(rule.pattern)
+    legacy_text = {p.removeprefix(_LEGACY_TEXT_PIN_PREFIX) for p in pins} - pins
+    out.extend(sorted(legacy_text))
     out.extend(user_added)
     return list(dict.fromkeys(out))
 
@@ -2224,16 +2290,20 @@ def _exception_applies(view: str, exceptions: list[str]) -> bool:
     return any(fnmatch.fnmatch(view, e.lower()) for e in exceptions)
 
 
-# Maps a deny pattern to the globs that exonerate it.  When an input matches
-# a deny pattern AND one of that pattern's exceptions, the deny is skipped.
-# This avoids a blanket allowlist that could bypass unrelated deny rules.
-#
-# Scoped to the two ``local-destructive`` rm rules: they are plain literal
-# strings, so they are the ones an ordinary search for their own subject
-# matter trips over.
+# Maps a deny pattern to the globs that exonerate it: when an input matches a
+# deny pattern AND one of its exceptions, the deny is skipped (no blanket
+# allowlist that could bypass unrelated rules).  Scoped to the two
+# ``local-destructive`` rm rows, so a read-only search for their own subject
+# (``grep "rm -rf /" src/``) is let through.  Keyed off each row's LIVE pattern
+# via ``_RULES_BY_ID``: ``is_denied`` resolves an exception by the pattern string
+# in the effective set, so a hard-coded key that drifted would drop the carve-out.
 _DENY_EXCEPTIONS: dict[str, list[str]] = {
-    "rm -rf /.*": list(_INERT_SEARCH_GLOBS),
-    "rm -rf ~.*": list(_INERT_SEARCH_GLOBS),
+    **{
+        _RULES_BY_ID[_rule_id].pattern: list(_INERT_SEARCH_GLOBS)
+        for _rule_id in ("local-destructive-rm-rf-root", "local-destructive-rm-rf-home")
+    },
+    # A legacy-text pin enforces the old spelling verbatim; it keeps the carve-out.
+    **{_legacy: list(_INERT_SEARCH_GLOBS) for _legacy in _LEGACY_TEXT_PINS},
 }
 
 

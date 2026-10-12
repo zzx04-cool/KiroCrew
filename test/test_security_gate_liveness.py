@@ -256,7 +256,21 @@ def _url_payload_command(n: int) -> str:
 #: data-consumer exemption. The branch grows a ``(?<!^-)`` guard and its comment states
 #: which terminal ``e`` is the command. Every execute construct it read before is still
 #: read; no other pattern moved.
-_PACKAGE_LINE_BUDGET = 28_864
+#:
+#: Raised again, from 28,864, for narrowing the two ``local-destructive-rm-rf-*``
+#: catalog rows: the root/home ``.*``-suffixed patterns refused ordinary cleanup
+#: of a named child under root/home (``rm -rf /tmp/x``, ``rm -rf ~/.cache/foo``).
+#: Each one-line pattern is a multi-line lookahead that fires only on the dir
+#: ITSELF or a whole-tree expansion, plus the comment explaining the boundary
+#: set. A narrowing, not a new tier: every root/home-itself wipe still denies.
+#: Also re-keyed the inert-search carve-out off the live rule pattern and added
+#: the two pre-narrowing spellings to the legacy-pattern alias map, so an
+#: administrator ceiling pinning the old pattern text keeps forcing the rows on.
+#: A pin in the old text also keeps enforcing that text as a deny regex, and each
+#: row scans every operand of its invocation in linear time, through one shared
+#: operand scan that tells a command boundary from a redirect or a separator
+#: character inside a word.
+_PACKAGE_LINE_BUDGET = 28_935
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
