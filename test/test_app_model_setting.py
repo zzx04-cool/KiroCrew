@@ -199,6 +199,23 @@ class TestResolveAppSpawnModel:
         cfg = _config(tmp_path)
         assert resolve_app_spawn_model(cfg, "other-app", "worker") == ""
 
+    def test_the_default_crews_pin_does_not_block_a_spawn(self, tmp_path, _no_template_pin):
+        """The spawn's agent tier is the spawn session's, not the chat session's.
+
+        A chat session on no named agent runs as the default crew, so the default
+        crew's pin is its agent tier. A spawn of the app's own template is not that
+        crew: its session ignores the default crew's pin and starts on the global
+        default. Judging the spawn by the chat tier would therefore drop the
+        per-app setting for a spawn that never runs on the crew's model.
+        """
+        from kiro_crew.config.loader import _agent_tier_model, _model_scope_filter
+        from kiro_crew.session import _session_model
+
+        cfg = _config(tmp_path, default_crew_model=CREW_PIN)
+        assert _agent_tier_model(cfg, "worker", _model_scope_filter(cfg)) == CREW_PIN
+        assert _session_model(cfg, "worker") == GLOBAL_DEFAULT
+        assert resolve_app_spawn_model(cfg, APP, "worker") == APP_PIN
+
 
 # ── A real turn on an app-owned slot ────────────────────────────────────────
 
@@ -354,10 +371,10 @@ class _FakeManager:
 
 class TestAppSpawn:
     @pytest.fixture(autouse=True)
-    def _known_agent(self, monkeypatch):
+    def _known_agent(self, _floor_monkeypatch):
         import kiro_crew.apps.spawn_sdk as spawn_sdk
 
-        monkeypatch.setattr(
+        _floor_monkeypatch.setattr(
             spawn_sdk,
             "list_agents",
             lambda: [types.SimpleNamespace(name="worker", filename=f"{APP}--worker.json")],
@@ -463,6 +480,8 @@ class TestSettingsWrite:
             "apps.demo-app",
             "apps.demo-app.model.x",
             "apps.-demo.model",
+            "apps.demo\n.model",
+            "apps.demo-app.model\n",
             ["apps"],
             None,
         ],
@@ -471,6 +490,15 @@ class TestSettingsWrite:
         from kiro_crew.dashboard.handlers import core
 
         assert core._editable_config_spec(path) is None
+
+    def test_the_app_name_grammar_is_the_manifests(self):
+        # One spelling of the app-name grammar: the PATCH allowlist reads the
+        # manifest's ``KEBAB_RE`` rather than restating it, so the two cannot drift.
+        from kiro_crew.apps import manifest
+        from kiro_crew.dashboard.handlers import core
+
+        assert core.KEBAB_RE is manifest.KEBAB_RE
+        assert not hasattr(core, "_APP_MODEL_PATH_RE")
 
     @pytest.mark.asyncio
     async def test_a_pick_is_written_under_the_app(self, _cfg_file, _advertised):
@@ -510,3 +538,40 @@ class TestSettingsWrite:
                 json={"path": f"apps.{APP}.model", "value": "bad; rm -rf /"},
             )
             assert resp.status == 400
+
+
+# ── The model chip's resolver ───────────────────────────────────────────────
+
+
+class TestResolvedModelEndpoint:
+    """The composer chip reads this endpoint, so it must name the app's model too."""
+
+    async def _get(self, cfg: KiroCrewConfig, params: dict) -> dict:
+        from kiro_crew.dashboard.handlers import api_kirocrew_agent_resolved_model
+
+        app = web.Application()
+        app.router.add_get("/api/agents/resolved-model", api_kirocrew_agent_resolved_model)
+        with unittest.mock.patch.object(KiroCrewConfig, "load", return_value=cfg):
+            async with TestClient(TestServer(app)) as client:
+                return await (await client.get("/api/agents/resolved-model", params=params)).json()
+
+    @pytest.mark.asyncio
+    async def test_the_owning_app_is_part_of_the_answer(self, tmp_path, _no_template_pin):
+        body = await self._get(_config(tmp_path), {"agent": "", "app": APP})
+        assert body["model"] == APP_PIN
+
+    @pytest.mark.asyncio
+    async def test_without_an_app_the_answer_is_unchanged(self, tmp_path, _no_template_pin):
+        body = await self._get(_config(tmp_path), {"agent": ""})
+        assert body["model"] == GLOBAL_DEFAULT
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("app", ["Demo", "../x", "demo_app", ""])
+    async def test_a_value_that_is_not_an_app_name_is_ignored(
+        self, tmp_path, _no_template_pin, app
+    ):
+        cfg = _load_config(
+            tmp_path, {"agent": {"model": GLOBAL_DEFAULT}, "apps": {app or "x": {"model": APP_PIN}}}
+        )
+        body = await self._get(cfg, {"agent": "", "app": app})
+        assert body["model"] == GLOBAL_DEFAULT

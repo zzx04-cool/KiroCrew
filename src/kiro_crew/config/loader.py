@@ -7624,8 +7624,11 @@ def resolve_app_spawn_model(config: KiroCrewConfig, app_name: str, agent_name: s
     The app's own ``apps.<name>.model`` when the user set one, unless the agent
     itself pins a model, which wins as it does for an app session. The agent tier
     is the one the spawn's session resolves (``session._session_model``): the crew
-    of that name, when there is one, then the template's own pin. ``""`` leaves the
-    spawn exactly as it is without the setting.
+    of that name, when there is one, then the template's own pin. That is not
+    :func:`_agent_tier_model`, which reads a name that is no crew as the DEFAULT
+    crew: a chat session on such a name runs as that crew, a spawn's session does
+    not, so the default crew's pin must not hide the setting from a spawn. ``""``
+    leaves the spawn exactly as it is without the setting.
     """
     in_scope = _model_scope_filter(config)
     app_pin = in_scope(app_model_pin(config, app_name))
