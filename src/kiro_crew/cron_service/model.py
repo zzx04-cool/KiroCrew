@@ -178,6 +178,15 @@ class CronJob:
     # Schedule page never detaches a job from its installer. ``""`` means "not
     # installer-managed".
     managed_by: str = ""
+    # The digest of the ``app.json`` cron fields the app bridge last applied to
+    # this job (``kiro_crew.apps.bridges.app_cron_manifest_digest``). Stamped
+    # when the bridge creates an app's job and rewritten each time it re-applies
+    # a changed manifest entry; ``""`` is "no manifest applied yet" -- a person's
+    # job, or an app job from before the field existed -- which the bridge
+    # treats as changed once. Only the bridge writes it: no dashboard, MCP or
+    # CLI update forwards the key, so a hand edit cannot forge "already applied"
+    # and make the next manifest change skip the job.
+    app_manifest_digest: str = ""
     silent: bool = False  # suppress auto-delivery; agent sends via send_message
     session_key: str = ""  # session that created this job (for scoped removal)
     last_posted_hash: str = ""  # hash of last result posted to Slack (dedup)

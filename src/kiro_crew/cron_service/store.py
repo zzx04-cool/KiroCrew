@@ -385,6 +385,7 @@ def _job_from_record(j: dict[str, Any], *, warn_on_coercion: bool = True) -> Cro
         source_preset=_guard_str("source_preset"),
         source_template_prompt=_guard_str("source_template_prompt"),
         managed_by=_guard_str("managed_by"),
+        app_manifest_digest=_guard_str("app_manifest_digest"),
         silent=j.get("silent", False),
         session_key=_guard_str("session_key"),
         last_posted_hash=_guard_str("last_posted_hash"),
@@ -611,22 +612,32 @@ def job_record(j: CronJob) -> dict[str, Any]:
         "secret_env_pending_ts": j.secret_env_pending_ts,
     }
     # Written only when set, and last: a store with no installer-managed job
-    # stays byte-identical to the one an older build writes (pinned by
-    # test_cron_refactor_contract's store-bytes fixtures). An older build reads a
-    # newer store's extra key and, from this build on, writes it back
-    # (decode_store / encode_store).
+    # and no app-registered job stays byte-identical to the one an older build
+    # writes (pinned by test_cron_refactor_contract's store-bytes fixtures). An
+    # older build reads a newer store's extra key and, from this build on,
+    # writes it back (decode_store / encode_store).
     if j.managed_by:
         record["managed_by"] = j.managed_by
+    if j.app_manifest_digest:
+        record["app_manifest_digest"] = j.app_manifest_digest
     return record
 
 
 #: Every key :func:`job_record` can write, read off the encoder itself so the two
-#: cannot drift: a job that sets each conditionally written key (``managed_by``).
-#: A record key outside this set came from a newer build. A key inside it is this
-#: build's to write or to omit, so a value this build cleared stays cleared.
+#: cannot drift: a job that sets each conditionally written key (``managed_by``,
+#: ``app_manifest_digest``). A record key outside this set came from a newer
+#: build. A key inside it is this build's to write or to omit, so a value this
+#: build cleared stays cleared.
 _KNOWN_JOB_KEYS = frozenset(
     job_record(
-        CronJob(id="", name="", message="", schedule=CronSchedule(kind="cron"), managed_by="-")
+        CronJob(
+            id="",
+            name="",
+            message="",
+            schedule=CronSchedule(kind="cron"),
+            managed_by="-",
+            app_manifest_digest="-",
+        )
     )
 )
 

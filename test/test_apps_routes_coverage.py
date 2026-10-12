@@ -1638,6 +1638,69 @@ class TestUpdateApp:
         assert "registration" in data
 
     @pytest.mark.asyncio
+    async def test_update_registers_crons_with_the_running_scheduler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An update promotes the rewritten app-crons.json into the live scheduler.
+
+        The bridge re-applies a changed manifest entry to a job it already
+        registered, but it only runs where it is called -- so an update that did
+        not call it left every existing job on its old values until the next
+        gateway start.
+        """
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        enable_app(APP)
+        monkeypatch.setattr(
+            routes_mod,
+            "update_app",
+            lambda source, expected_name=None: AppResult(
+                ok=True, name=APP, message="updated"
+            ),
+        )
+        monkeypatch.setattr(routes_mod, "deregister_app", lambda n: None)
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: None)
+        monkeypatch.setattr(routes_mod, "start_app_backend", lambda n: None)
+        resync = AsyncMock(return_value=[])
+        monkeypatch.setattr(routes_mod, "register_app_crons_with_service", resync)
+
+        app = _make_app(dashboard_user="owner")
+        scheduler = object()
+        app["state"].crons = scheduler
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(f"/api/apps/{APP}/update", json={})
+            assert resp.status == 200
+
+        resync.assert_awaited_once_with(APP, scheduler)
+
+    @pytest.mark.asyncio
+    async def test_update_without_a_scheduler_registers_no_crons(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        enable_app(APP)
+        monkeypatch.setattr(
+            routes_mod,
+            "update_app",
+            lambda source, expected_name=None: AppResult(
+                ok=True, name=APP, message="updated"
+            ),
+        )
+        monkeypatch.setattr(routes_mod, "deregister_app", lambda n: None)
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: None)
+        monkeypatch.setattr(routes_mod, "start_app_backend", lambda n: None)
+        resync = AsyncMock(return_value=[])
+        monkeypatch.setattr(routes_mod, "register_app_crons_with_service", resync)
+
+        # The route test state carries no ``crons``: nothing to register with.
+        async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
+            resp = await client.post(f"/api/apps/{APP}/update", json={})
+            assert resp.status == 200
+
+        resync.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_app_token_cannot_replace_repository_bound_code_from_local_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -44,6 +44,7 @@ from kiro_crew.apps.bridges import (
     deregister_app,
     deregister_app_crons_reporting_failures,
     register_app,
+    register_app_crons_with_service,
 )
 from kiro_crew.apps.builtins import BUILTIN_NAMES
 from kiro_crew.apps.dependencies import clean_dependencies
@@ -1041,6 +1042,17 @@ async def handle_update_app(request: web.Request) -> web.Response:
         still_enabled = await _app_may_run_after_install(name)
         if still_enabled:
             up_reg = await _register_app_off_loop(name)
+            # Promote the rewritten app-crons.json into the RUNNING scheduler
+            # now. register_app_crons_with_service re-applies a changed entry to
+            # the job it already registered, but its other callers are enable,
+            # gateway start and the CLI -- so without this call an updated
+            # cron field kept its old value until the next gateway start, with
+            # nothing saying so. Async: it awaits the CronSDK mutators, which
+            # offload each store-lock spin, so the loop is never parked. A
+            # failure is logged and audited, never a failed update: the files
+            # and registry are already current, and the next registration
+            # pass applies the same definitions.
+            await _resync_app_crons_after_update(request, name)
             await asyncio.get_running_loop().run_in_executor(
                 subprocess_executor(), start_app_backend, name
             )
@@ -1052,6 +1064,37 @@ async def handle_update_app(request: web.Request) -> web.Response:
     if up_reg:
         resp["registration"] = up_reg.to_dict()
     return web.json_response(resp)
+
+
+async def _resync_app_crons_after_update(request: web.Request, name: str) -> None:
+    """Register the updated app's crons with the running scheduler, if there is one.
+
+    Split out of :func:`handle_update_app` so the no-service case (a test app
+    with no ``state.crons``, a gateway booting without a scheduler) and the
+    audit shape stay readable there. Mirrors ``hooks_integration.on_app_enable``:
+    the same bridge call, the same ``app_crons_register`` SEL rows.
+    """
+    state = request.app.get("state")
+    cron_service = getattr(state, "crons", None) if state else None
+    if cron_service is None:
+        return
+    try:
+        registered = await register_app_crons_with_service(name, cron_service)
+        sel().log_api_access(
+            caller="dashboard",
+            operation="app_crons_register",
+            outcome="completed",
+            resources=f"app={name} crons={registered}",
+        )
+    except Exception as exc:
+        logger.warning("Cron registration after updating %s failed: %s", name, exc)
+        sel().log_api_access(
+            caller="dashboard",
+            operation="app_crons_register",
+            outcome="failed",
+            resources=name,
+            error=str(exc),
+        )
 
 
 async def handle_register_external(request: web.Request) -> web.Response:

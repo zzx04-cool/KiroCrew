@@ -145,6 +145,30 @@ and self-registration refuse a manifest without it, with an error that names the
 fix. An app installed before it declared the grant keeps loading and firing its
 crons; it meets the rule on its next update.
 
+**Changing a cron after install.** Each registered job remembers, field by
+field, the manifest entry it was built from. When the app's crons are registered
+again -- an app update, a gateway start, an enable -- each field in the table
+above whose manifest value changed is re-applied to the job; `enabled` is the
+exception, being the initial pause state only. A field the author did not change
+is left exactly as it is, including any edit the user made to it on the Schedule
+page, and so is a job whose entry did not change at all. The precedence is
+**manifest over hand edit** for a field the author changed, **hand edit over
+manifest** for a field the author did not, and **the user's pause state over the
+manifest** always: a paused job gets the new values and stays paused. Settings the manifest does not own -- a delivery channel, a model, chat
+visibility, a secret grant -- are never touched. A change to `command`, `script`,
+`agent_sequence` or `env` is the exception: the scheduler accepts those fields at
+creation only, so the change is logged (and audited as
+`app_cron_resync_pending_reenable`) on every registration until the app is
+disabled and enabled again, which is when it reaches the job; the entry's other
+changed fields still land at once. A `message` cleared to empty is reported the
+same way, because the scheduler keeps the stored prompt on an empty value. A job registered
+by a build that did not yet record its entry is brought up to the manifest once,
+on the next registration: nothing recorded which entry it came from, so the
+manifest is applied even if the author changed nothing, and an edit the user
+made to one of its manifest-owned fields is replaced. The gateway log names
+each replaced field with its old and new value (a WARNING line ending in
+"job predates the manifest stamp") so the user can put the edit back.
+
 > **Caveat:** disabling an app deletes its registered cron jobs when a cron
 > service is reachable, and re-enabling the app re-registers them from the
 > manifest. A cron shipped with `"enabled": false` that a user later resumed

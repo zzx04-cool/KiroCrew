@@ -334,6 +334,7 @@ class CronSDK:
         timeout_secs: int,
         timeout: int,
         folder_id: str = "",
+        app_manifest_digest: str = "",
     ) -> dict[str, Any]:
         """Build the kwargs common to the sync/async ``CronService.add_job``.
 
@@ -374,7 +375,7 @@ class CronSDK:
         # memory by naming it. The name is passed through as ``agent_id``, so an
         # app cron behaves exactly as it does on main and can only reach global
         # V1 memory.
-        return dict(
+        kwargs: dict[str, Any] = dict(
             name=name,
             message=message,
             every_secs=every_secs,
@@ -395,6 +396,13 @@ class CronSDK:
             folder_id=folder_id or "",
             created_by=self._owner_prefix,
         )
+        # Only when set: the stamp travels through ``add_job_if_absent_async``
+        # into ``build_job``, which accepts it; the explicit ``add_job`` /
+        # ``add_job_async`` signatures do not, and an app's own create carries
+        # no stamp, so their kwargs stay exactly what they were.
+        if app_manifest_digest:
+            kwargs["app_manifest_digest"] = app_manifest_digest
+        return kwargs
 
     # ── Create ──
 
@@ -552,6 +560,7 @@ class CronSDK:
         timeout_secs: int = 0,
         timeout: int = 0,
         folder_id: str = "",
+        app_manifest_digest: str = "",
     ) -> Any:
         """Atomic add-if-absent by job name; returns None when already present.
 
@@ -570,6 +579,10 @@ class CronSDK:
         when the name is already present, so an app that set the mode in a
         follow-up ``update_job`` would skip that write on every registration
         after the first and leave the job on whatever mode it was created with.
+
+        ``app_manifest_digest`` is the bridge's stamp of the manifest entry the
+        job was built from (see ``bridges.app_cron_manifest_digest``); an app
+        calling this through the SDK leaves it empty.
         """
         # Off-loop, same reason as add_job_async: this is the method `bridges`
         # awaits on the gateway loop for every app cron at enable and at start.
@@ -588,6 +601,7 @@ class CronSDK:
                 approval_mode=approval_mode, timeout_secs=timeout_secs,
                 timeout=timeout,
                 folder_id=folder_id,
+                app_manifest_digest=app_manifest_digest,
             ),
         )
         if job is not None:

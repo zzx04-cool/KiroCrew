@@ -60,6 +60,9 @@ _CRON_STRING_FIELD_CAPS: tuple[tuple[str, int], ...] = (
     ("command", 5000),
     ("script", 200),
     ("timezone", 50),
+    # Written by the app bridge alone (a sha256 hex digest); listed so the
+    # create and update gates type-check it like every other persisted string.
+    ("app_manifest_digest", MAX_SHORT_STRING),
     # Secret-grant fields have no boundary FieldSpec: the pins are sha256 hex
     # digests computed server-side by the grant endpoint / cron_secret_request
     # tool (grant validity is enforced by pin equality at fire time, not by
@@ -194,6 +197,7 @@ def build_job(
     minimal_context: bool = False,
     timeout: int = 0,
     timeout_secs: int = 0,
+    app_manifest_digest: str = "",
 ) -> CronJob:
     """Validate inputs and construct the :class:`CronJob` (no I/O, no lock).
 
@@ -250,6 +254,7 @@ def build_job(
             "command": command,
             "script": script,
             "timezone": timezone,
+            "app_manifest_digest": app_manifest_digest,
         },
         required=frozenset({"name", "message"}),
     )
@@ -305,6 +310,7 @@ def build_job(
         minimal_context=minimal_context,
         timeout=timeout,
         timeout_secs=int(timeout_secs) if timeout_secs else seams._JOB_TIMEOUT_SECS,
+        app_manifest_digest=app_manifest_digest or "",
     )
 
 
@@ -543,6 +549,11 @@ def apply_job_update(
         job.chat_folder_id = ""
     if "model" in kwargs:
         job.model = str(kwargs["model"] or "").strip()
+    if "app_manifest_digest" in kwargs:
+        # The app bridge's own record of the manifest entry it applied. No
+        # operator surface (dashboard, MCP, CLI) forwards this key, so the
+        # only caller is the bridge re-applying a changed ``app.json`` entry.
+        job.app_manifest_digest = str(kwargs["app_manifest_digest"] or "")
     if "secret_env" in kwargs and kwargs["secret_env"] is not None:
         job.secret_env = dict(kwargs["secret_env"])
         # Pin travels with the grant; a revoke (empty map) clears it.

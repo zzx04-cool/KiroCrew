@@ -287,6 +287,10 @@ class TestCapAlignment:
         # CRON_ADD_SCHEMA (grants cannot be created through cron_add).
         "secret_env_pin",
         "secret_env_pending_pin",
+        # The app bridge's stamp of the manifest entry an app job was built
+        # from: written by register_app_crons_with_service alone, never via
+        # CRON_ADD_SCHEMA or any operator update. General ID cap applies.
+        "app_manifest_digest",
     }
 
     def test_table_caps_match_cron_add_schema(self):

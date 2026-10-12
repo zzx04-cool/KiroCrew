@@ -699,14 +699,82 @@ configuration before it is useful). The contract, end to end:
   reader of `crons.json` could capture as enabled). It is visible in the
   Schedule view and resumable via `cron_resume`/dashboard, never silently
   active and never invisible.
-- **Startup idempotency**: gateway-startup re-registration skips existing
+- **Startup idempotency**: gateway-startup re-registration finds existing
   jobs by name using `list_jobs(include_disabled=True)`, so a paused job IS
-  found and skipped — a user-resumed cron survives gateway restart
-  un-clobbered.
+  found, and the manifest re-sync below never sends `enabled`/`user_paused` —
+  a user-resumed cron survives gateway restart un-clobbered, and a manifest
+  that later flips `enabled` is not a change (the key is outside the digest).
 - **Lifecycle caveat**: `on_app_disable` removes the app's jobs; re-enabling
   the app re-registers from the manifest, so a cron the user had resumed
   returns to **paused** (manifest is the sole source of truth on
   re-register). Documented in `docs/app-kit/manifest-reference.md`.
+
+### App-manifest cron re-sync (`app_manifest_digest`)
+
+`register_app_crons_with_service` used to be add-if-absent by name, so a
+changed `app.json` cron field reached a fresh install and never a machine that
+already had the job (#19192). Each app job now carries
+`CronJob.app_manifest_digest`: one 12-hex sha256 per manifest-owned key
+(`bridges._MANIFEST_OWNED_CRON_KEYS` — every `app-crons.json` key except
+`name`, `app` and `enabled`; the tuple's ORDER is the stamp format, append-only)
+over the key's canonical JSON value, joined with `,` (194 chars, under the
+general short-string cap), stamped at create through
+`CronSDK.add_job_if_absent_async(app_manifest_digest=...)` and persisted by the
+store only when set, so a store with no app job keeps its pre-stamp bytes.
+Registration then compares, per definition:
+
+- **equal stamp** → the job is not touched (no vet, no write); hand edits stay.
+- **different stamp** → the definition is re-vetted exactly as on create, then
+  `_resync_app_cron` applies it **field by field**: only the keys whose per-key
+  digest differs from the stamp are sent (`_UPDATE_KWARGS_FOR_KEY`; `every` and
+  `cron_expr` are one schedule and travel together), so a person's edit to a
+  key the author did not change is never touched. A stamp this build cannot
+  read (`""`, or a different key count from an older or newer key list) has no
+  per-field history and applies the whole entry once. Fields go through
+  `CronSDK.update_job_async` **in place**
+  (same id, history and chat tab), spelled for the update gate: `agent` as
+  `agent_id`, a 0 `timeout_secs` as the explicit `_JOB_TIMEOUT_SECS` default
+  (the update gate refuses 0), a short `every` clamped to `_MIN_INTERVAL_SECS`
+  (the update gate refuses it where `build_job` clamps). `command`, `script`,
+  `agent_sequence` and `env` (`bridges._CREATE_ONLY_CRON_KEYS`) have no update
+  branch on purpose (the fire-time vet and a secret grant's pin bind to them),
+  and the bridge does **not** remove-and-re-add for them: a remove-then-add
+  loses the job when the create gate refuses the replacement (the manifest does
+  not bound `message`; `build_job` does) and resets every setting the manifest
+  does not own (`channel`, `model`, `hide_in_chat`, a secret grant). A change to
+  one of them is logged at WARNING, audited as
+  `app_cron_resync_pending_reenable outcome=denied fields=...`, and reaches the
+  job through the documented disable/enable of the app. A `message` cleared
+  to `""` is pending in the same way: `apply_job_update` keeps the stored
+  prompt on an empty value, so stamping it would hide a job still running
+  obsolete instructions. For each pending key the stamp written holds the
+  digest of what the job CARRIES (for a script, its resolved path, which no
+  manifest spelling equals), never the entry's, so the drift is not marked as applied:
+  every later pass finds the stamp differing, re-derives the same pending keys
+  and reports them again. When the stamp equals that applied digest the pass
+  writes nothing (`how=pending`), so a person's edits made meanwhile are not
+  rewritten on every start; the entry's other fields land on the first pass.
+  The pass is audited as `app_cron_resync_job how=updated|partial|pending|vanished`.
+- Every re-apply logs each update-gate field it changed as `field: old -> new`
+  (`_overwritten_fields`; values clipped to 120 chars), at INFO for a stamped
+  job and at WARNING, suffixed "job predates the manifest stamp", for a job
+  with no stamp -- the one-time pass over jobs from before the stamp existed
+  applies the manifest whether or not the author changed anything, since
+  nothing recorded which entry they came from, and that line is the only
+  record of a hand edit it replaced. The trade-off is deliberate: without it
+  the stale field the re-sync exists to fix stays stale on every pre-existing
+  install.
+- Precedence, in one line: **manifest over hand edit** for a manifest-owned
+  field whose manifest value changed; **hand edit over manifest** for one the
+  author did not change; **pause state and non-manifest settings over manifest**
+  always.
+
+Only the bridge writes the stamp: the dashboard, MCP and CLI update paths build
+their kwargs from explicit allowlists that do not include it, so a hand edit
+cannot forge "already applied". The digest is computed over the DEFINITION, not
+the job — the job holds the resolved script path and folder id, which differ
+between hosts for one manifest. Pinned by `test/test_app_cron_manifest_resync.py`
+against a real `CronService`.
 
 ### Hide in Chat (`hide_in_chat`)
 
@@ -764,7 +832,7 @@ command or script runners may access member memory.
 - **Script mode**: `script` field specifies a Python callable path (`~/.kiro/crew/crons/file.py:function`). The function receives a `ScriptContext` with `ctx.call_tool()` (MCP tool access), `ctx.notify()` (deliver message), `ctx.list_session_folders()` / `ctx.create_session_folder()` / `ctx.open_session()` / `ctx.send_to_session()` / `ctx.set_session_mode()` (dashboard sessions, see **Script-mode dashboard sessions** below), `ctx.message` (arguments from the `message` field). Control flow via exceptions: `raise Skip()` to silently retry next tick, `raise Done()` to complete and remove the job, `raise Report("msg")` to deliver a message and keep running.
 - **Script path resolution and its two roots**: `resolve_script_path` (`cron_script.py`) is the single resolver for every script spec, and its DEFAULT is the operator contract: a relative path resolves against the process CWD and the resolved file must sit under `~/.kiro/crew/crons/`. `cron_add`, the CLI's `cron add` and `cron preview` paths and both vault-grant sites take that default, so an authoring caller can never name a file outside `crons/`. An app cron's script legitimately ships inside the app's own bundle instead, and two opt-in keywords cover that, each opening exactly one root. `app_root` is passed where a MANIFEST's own spec is vetted (`apps.bridges`, `apps.cron_sdk`): it is the base a relative spec resolves against, because `"job.py:run"` means "next to my manifest" and is the only spelling an app can write without knowing its install location -- resolving it against the gateway process's CWD instead produced a path that changed with every launch and named a file that was never there (#11819) -- and containment narrows to that ONE bundle, so app A cannot name a script in app B's tree. `allow_bundle_roots` is passed only by the three consumers that re-resolve a spec ALREADY vetted and persisted while holding no app context (the fire-time governance gate, the launcher, the dashboard script-source endpoint); containment is then the shared bundle roots (`cron_script._trusted_script_bundle_roots`) -- the builtin manifest sources (the package's `apps/builtins` plus the active edition's manifest sources, the same walk `shipped_builtin_app_root` uses to choose a builtin's root) and `<config_dir>/apps`, with the package directory admitted only when that walk fails -- because a stored absolute bundle path is all those callers have to go on. The app bridge and the cron SDK therefore PERSIST the resolved absolute spec rather than the manifest's relative one: a relative value on the job record would be re-resolved against each consumer's own CWD. A bundle root accepts `.py` files only, which is containment and not style -- a bundle also holds `.app_secret` (the app's gateway credential) and `data/`, and a resolved script's bytes are readable through the script-source endpoint, so the suffix keeps every non-module bundle file off that surface; `crons/` keeps no such rule because it holds nothing else. A `..`-bearing relative spec is refused lexically before any join so the verdict never depends on the host's path grammar, and `resolve()` runs before containment so a link pointing out of a trusted root is rejected on its target. The vault-grant reader (`_read_script_body`) stays pinned to `crons/` alone and the grant paths pass neither keyword, so a bundle script can register and run but can never be handed a secret.
 - **Residual: a script or command cron child can read every installed app's `.app_secret`**: making a bundle script resolvable means a cron child now legitimately runs with an app bundle on `sys.path`, and nothing masks `<config_dir>/apps` from it. `.app_secret` is a bearer credential rather than a marker -- `dashboard.token_auth.validate_app_secret` exchanges it for that app's scoped token -- and the `cc` profile both cron exec paths run under leaves it readable: `run_script_sandboxed` and `run_command_sandboxed` both call `wrap_argv(..., mode="cc")` with no apps mask. So an app-authored cron script, an operator script under `crons/`, and a command cron can each read any installed app's credential. This is not introduced by the path fix: the same read is available on a tree without it. It is recorded here because the path fix is what makes app-shipped cron scripts actually run, so the read goes from unreachable-in-practice to ordinary. Closing it is tracked separately (#16061), with the three conditions a fix has to satisfy at once.
-- **Persisted bundle paths go stale if a bundle moves**: because the app bridge and the cron SDK store the RESOLVED absolute spec, and `add_job_if_absent_async` matches an existing job by name without refreshing its fields, a bundle root that changes location leaves the stored `job.script` naming the old path and the job fails `FileNotFoundError` at every fire. Recovery is to disable and re-enable the app, which re-registers the cron against the current root. Reachable only where a bundle root can move between runs, which today means the builtin/edition leg.
+- **Persisted bundle paths go stale if a bundle moves**: because the app bridge and the cron SDK store the RESOLVED absolute spec, and the manifest re-sync above refreshes a job only when its DEFINITION changed (the digest covers the manifest's relative `script`, not the resolved path), a bundle root that changes location under an unchanged manifest leaves the stored `job.script` naming the old path and the job fails `FileNotFoundError` at every fire. Recovery is to disable and re-enable the app, which re-registers the cron against the current root. Reachable only where a bundle root can move between runs, which today means the builtin/edition leg.
 - **Script-mode MCP identity**: a script cron runs as the principal `cron:<job id>` — the same key `ScriptContext` presents to the gateway over HTTP (`X-Session-Key` / `caller_session`) and the key an agent cron's session runs under, so ownership and audit see one principal per job whichever surface the job uses. It is delivered on two hops: `run_script_sandboxed` exports `KIROCREW_SESSION_KEY=cron:<job id>` into the script child, and `McpToolClient` hard-assigns the same key on the env of every MCP server `ctx.call_tool()` spawns — after both the inherited-env and per-server `env` overlays, so a script that rewrites its own `os.environ` cannot present a different principal (best-effort friction on the same footing as the rest of the env-based identity contract, not a containment boundary). This is load-bearing rather than cosmetic: a direct MCP spawn is not routed through gatewayd, so it gets no caller block, and nobody publishes a signed `session_pid_*` sidecar for the launcher pid — leaving a script cron with **none** of the three sources `_resolve_session_key_strict()` accepts, which fails closed for writes only. Every state-mutating tool then returns its refusal as an ordinary result string while read-only calls keep working, so the job reports `ok` and writes nothing. Two consequences to keep in mind: `cloud.aws.assert_human_action` keys on the same env var, so destructive cloud verbs from a script cron are refused exactly as they are from an agent session; and job ownership is unchanged, so a script cron reaches only the jobs recorded under its own key (`cron_trigger` against another job stays refused, as it is for agent crons). The general rule this is one instance of: **a spawn path that hands a child MCP access must hand it an identity too**, because the strict resolver fails closed for writes alone and the omission is therefore silent.
 - **Script-mode MCP reads**: `McpToolClient` decodes the server's stdout as UTF-8 with replacement and reads it through `json_line.parse_json_object_line`, so a banner or log line on stdout, a scalar, or a line nested past the decoder's ceiling is skipped instead of failing the handshake or the call. Every line read, a skipped one included, counts toward `_rpc`'s 1000-line cap, so a server that writes only noise fails the call rather than holding it until the job timeout.
 - **Script-mode MCP server lifetime**: `ctx.call_tool()` starts a server on the first call to it and keeps it for the run's later calls to the same server name, so a server that signs in to a service when it starts signs in once per run rather than once per call (a Slack server signing in once per call drew HTTP 429 on most calls of a once-a-minute cron, #16659). At most one server per name is kept. A call the server answers with a tool error (a JSON-RPC `error` reply or an `isError` result, raised as `McpToolError`) keeps the server; a call that fails any other way stops its server and the next call starts a fresh one; a kept server whose process has exited is replaced; a call made while another call to the same server is still running starts a server of its own, so a call the script has given up on never holds up a later one. A server whose start-up sign-in failed and that reports the failure as a tool error is therefore kept as well, and this is accepted. Its own retry rules decide when it signs in again, and one that never retries keeps failing only until the run ends, since the next run starts fresh servers. Restarting it after each such error would sign in again at once, which is the repeated sign-in that keeping servers avoids. The launcher calls `ScriptContext.close()` in a `finally` once the script function returns, which stops every kept server; it never raises, and calls after it keep nothing. A kept server therefore lives until the run ends rather than for one call. A run killed at its timeout never reaches that `finally`, but its kept servers still stop: each runs inside the script child's process group, which the timeout `SIGKILL`s on POSIX, and inside the child's process tree, which `taskkill /T` reaps on Windows (`_kill_proc_group`). Only a server that starts a session of its own (`setsid`) outlives the kill, and it lives until it reads end-of-file on its stdin. `kirocrew cron preview` runs its script on the same `KeptMcpServers` lifecycle, so a previewed call signs in as often as the production run does. Pinned by `test/test_cron_script.py` (`TestScriptContextKeepsServers`, including `test_a_tool_error_keeps_its_server_for_the_next_call`, and `test_the_launcher_closes_the_context_however_the_script_ends`).
