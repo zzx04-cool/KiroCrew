@@ -34,6 +34,8 @@ const SHELL_HANDLES = [
   "crash-reports:get",
   "crash-reports:reveal",
   "dashboard:open-file",
+  "external-terminal:detect",
+  "external-terminal:open",
   "global-hotkey:get",
   "local-gateway:get",
   "local-gateway:set",
@@ -186,6 +188,8 @@ function harness({
   // process state that only holds for the duration of the native launch (the
   // narrowed launcher PATH openPathHardened installs and then restores).
   onOpenPath = null,
+  externalTerminal = undefined,
+  internalSecret = "",
   detectWsl = async () => ({
     available: true,
     distros: [],
@@ -360,6 +364,8 @@ function harness({
       return typeof crashScan === "function" ? crashScan() : crashScan;
     },
     glog: (line) => logs.push(line),
+    ...(externalTerminal ? { externalTerminal } : {}),
+    readInternalSecret: () => internalSecret,
   });
 
   return {
@@ -454,13 +460,13 @@ test("registerShell owns the exact shell channel set and is idempotent", () => {
 
   assert.deepEqual([...h.handlers.keys()].sort(), SHELL_HANDLES);
   assert.deepEqual([...h.listeners.keys()].sort(), SHELL_LISTENERS);
-  assert.equal(h.handlers.size + h.listeners.size, 36);
+  assert.equal(h.handlers.size + h.listeners.size, 38);
 
   // boot-complete is a further non-update host channel, but it is deliberately
   // gateway-owned and scoped to a single connecting WebContents. Registering it
   // globally here would weaken its sender check and leak listeners.
   assert.match(GATEWAY_SOURCE, /ipcMain\.on\("boot-complete", onComplete\)/);
-  assert.equal(h.handlers.size + h.listeners.size + 1, 37);
+  assert.equal(h.handlers.size + h.listeners.size + 1, 39);
   assert.equal(h.handlers.has("boot-complete"), false);
   assert.equal(h.listeners.has("boot-complete"), false);
 
@@ -1032,6 +1038,107 @@ test("dashboard:open-file hardens the launcher PATH across the native launch", a
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+// ── external terminal ─────────────────────────────────────────────────────
+
+/** A stand-in for external-terminal.js that records what the registrar asks. */
+function fakeExternalTerminal({ installed = ["kitty", "wezterm"], launchResult = { ok: true, app: "kitty" } } = {}) {
+  const calls = [];
+  const labels = { kitty: "kitty", wezterm: "WezTerm" };
+  return {
+    calls,
+    detectTerminals: () => {
+      calls.push(["detect"]);
+      return installed.map((id) => ({ id, label: labels[id] || id }));
+    },
+    launchFromGrant: async (grant, deps) => {
+      calls.push(["launch", grant, deps]);
+      return launchResult;
+    },
+  };
+}
+
+const GRANT = "g".repeat(43);
+
+const EXTERNAL_TERMINAL_CHANNELS = [
+  ["external-terminal:detect", []],
+  ["external-terminal:open", [GRANT]],
+];
+
+test("external-terminal channels reject a sender that is not the local dashboard", async () => {
+  for (const [channel, args] of EXTERNAL_TERMINAL_CHANNELS) {
+    // Wrong origin: a connection window pointed at a remote gateway.
+    const wrong = fakeExternalTerminal();
+    const h1 = harness({ externalTerminal: wrong });
+    h1.registrar.registerShell();
+    await assert.rejects(
+      () => h1.handlers.get(channel)(wslEvent("https://remote.example/chat"), ...args),
+      { message: `${channel} is restricted to the local dashboard` },
+    );
+    assert.deepEqual(wrong.calls, [], `${channel}: a rejected sender reaches no detection or launch`);
+
+    // Right origin but the window's gateway is remote (an SSH tunnel on loopback).
+    const remote = fakeExternalTerminal();
+    const h2 = harness({ externalTerminal: remote, wslGatewayLocal: false });
+    h2.registrar.registerShell();
+    await assert.rejects(
+      () => h2.handlers.get(channel)(wslEvent(), ...args),
+      { message: `${channel} is restricted to the local dashboard` },
+    );
+    assert.deepEqual(remote.calls, []);
+
+    // The primary port is held by something other than this shell's gateway.
+    const foreign = fakeExternalTerminal();
+    const h3 = harness({ externalTerminal: foreign, primaryPortOwner: "foreign" });
+    h3.registrar.registerShell();
+    await assert.rejects(
+      () => h3.handlers.get(channel)(wslEvent(), ...args),
+      { message: `${channel} is restricted to the local dashboard` },
+    );
+    assert.deepEqual(foreign.calls, []);
+  }
+});
+
+test("external-terminal:detect lists the installed allowlisted apps only", async () => {
+  const h = harness({ externalTerminal: fakeExternalTerminal() });
+  h.registrar.registerShell();
+  assert.deepEqual(await h.handlers.get("external-terminal:detect")(wslEvent()), {
+    apps: [{ id: "kitty", label: "kitty" }, { id: "wezterm", label: "WezTerm" }],
+  });
+  assert.equal(h.store.writes.length, 0, "the pick lives in gateway config, not the shell's store");
+});
+
+test("external-terminal:open launches only through a gateway grant redeemed with the internal secret", async () => {
+  const ext = fakeExternalTerminal();
+  const h = harness({ externalTerminal: ext, internalSecret: "s3cret" });
+  h.registrar.registerShell();
+  // A second argument naming an app, a path or an argv is ignored: the renderer
+  // hands over the opaque grant and nothing else.
+  const result = await h.handlers.get("external-terminal:open")(wslEvent(), GRANT, "/bin/sh", ["-c", "x"]);
+  assert.deepEqual(result, { ok: true, app: "kitty" });
+  const launches = ext.calls.filter(([n]) => n === "launch");
+  assert.equal(launches.length, 1);
+  const [, grant, deps] = launches[0];
+  assert.equal(grant, GRANT);
+  assert.equal(deps.backendUrl, "http://localhost:5476", "redeemed at this shell's own gateway");
+  assert.equal(deps.getSecret(), "s3cret");
+  assert.equal(typeof deps.fetchFn, "function");
+  assert.equal(h.shellCalls.length, 0, "nothing reaches shell.openPath or any shell method");
+});
+
+test("external-terminal:open passes a refusal through for the renderer to fall back", async () => {
+  const ext = fakeExternalTerminal({ launchResult: { ok: false, error: "no-grant" } });
+  const h = harness({ externalTerminal: ext });
+  h.registrar.registerShell();
+  assert.deepEqual(
+    await h.handlers.get("external-terminal:open")(wslEvent(), GRANT),
+    { ok: false, error: "no-grant" },
+  );
+});
+
+test("the registrar's default external terminal is the real allowlist module", () => {
+  assert.match(SOURCE, /externalTerminal = require\("\.\/external-terminal"\)/);
 });
 
 test("bind and unregister remain owned by the dedicated hotkey helper", () => {

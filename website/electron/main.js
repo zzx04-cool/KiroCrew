@@ -448,6 +448,7 @@ const ipcRegistrar = createIpcRegistrar({
   reopenCrewCompanionAfterUpdate,
   crashScan: scanCrashArtifacts,
   downloadExpectations,
+  readInternalSecret,
 });
 
 /**
