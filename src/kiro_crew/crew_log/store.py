@@ -1586,7 +1586,21 @@ def session_units_for_slot(slot: str, *, strict: bool = False) -> "tuple[str, ..
     """
     if not slot:
         return ()
-    return session_units_by_slot(strict=strict).get(slot, ())
+    if not strict:
+        return session_units_by_slot(strict=False).get(slot, ())
+    # The strict contract is TWO refusals and only one of them is narrowable.
+    #
+    # A SCAN that could not be made at all refuses every caller: a root that will not
+    # list says nothing about any slot, so there is no slot it could be attributed to
+    # and an empty listing taken for it would be a store failure read as success.
+    # ``strict_scan`` keeps that.
+    #
+    # A CHILD that cannot be proved while holding entries IS attributable -- its own
+    # opening entry names a slot -- so that refusal is re-asked about this slot alone.
+    # Store-wide it makes one damaged session a gateway-wide outage.
+    by_slot, unproven = _scan_slots(strict_scan=True)
+    _refuse_unprovable_unit(_checked_crew_log_root(KIND_SESSION), unproven, slot=slot)
+    return by_slot.get(slot, ())
 
 
 def session_units_by_slot(*, strict: bool = False) -> "dict[str, tuple[str, ...]]":
@@ -1604,6 +1618,21 @@ def session_units_by_slot(*, strict: bool = False) -> "dict[str, tuple[str, ...]
     holding entries, are both refused instead of being answered with a listing that
     is quietly short.
     """
+    by_slot, unproven = _scan_slots(strict_scan=strict)
+    if strict:
+        _refuse_unprovable_unit(_checked_crew_log_root(KIND_SESSION), unproven)
+    return by_slot
+
+
+def _scan_slots(*, strict_scan: bool) -> "tuple[dict[str, tuple[str, ...]], tuple[str, ...]]":
+    """The slot map and the children that could not be proved, scanned once.
+
+    Split out so the two halves of the strict contract can be applied separately: a
+    scan that FAILED is not attributable to any slot and refuses every caller, while a
+    child that cannot be proved is attributable and refuses only the slot it belongs
+    to. ``strict_scan`` carries the first; the returned unproven names let the caller
+    decide the second.
+    """
     global _slot_index
     try:
         root = _checked_crew_log_root(KIND_SESSION)
@@ -1613,15 +1642,13 @@ def session_units_by_slot(*, strict: bool = False) -> "dict[str, tuple[str, ...]
         # a caller that would VALIDATE against the listing passes ``strict`` and gets
         # the failure instead, because an empty listing taken for a scan that failed
         # would let it validate against a record that is not there.
-        if strict:
+        if strict_scan:
             raise
-        return {}
+        return {}, ()
     fingerprint = _slot_root_fingerprint(root, names)
     cached = _slot_index
     if cached is not None and cached[0] == fingerprint and not _any_now_provable(root, cached[2]):
-        if strict:
-            _refuse_unprovable_unit(root, cached[2])
-        return cached[1]
+        return cached[1], cached[2]
     rows: "dict[str, list[tuple[int, str]]]" = {}
     unproven: list[str] = []
     for name in names:
@@ -1653,9 +1680,21 @@ def session_units_by_slot(*, strict: bool = False) -> "dict[str, tuple[str, ...]
         rows.setdefault(unit_slot, []).append((order, unit_id))
     by_slot = {key: tuple(unit for _order, unit in sorted(found)) for key, found in rows.items()}
     _slot_index = (fingerprint, by_slot, tuple(unproven))
-    if strict:
-        _refuse_unprovable_unit(root, tuple(unproven))
-    return by_slot
+    return by_slot, tuple(unproven)
+
+
+def _unproven_holding_names(root: Path, unproven: "tuple[str, ...]") -> "list[str]":
+    """Every child that cannot be proved AND already holds log content.
+
+    :func:`_unproven_holding_content` answers the FIRST one, which is all a store-wide
+    refusal needs. A per-slot refusal has to consider each, because the first may
+    belong to another slot while a later one belongs to the caller's.
+    """
+    out: list[str] = []
+    for name in unproven:
+        if _unproven_holding_content(root, (name,)) is not None:
+            out.append(name)
+    return out
 
 
 def _unproven_holding_content(root: Path, unproven: "tuple[str, ...]") -> "str | None":
@@ -1693,17 +1732,95 @@ def _unproven_holding_content(root: Path, unproven: "tuple[str, ...]") -> "str |
     return None
 
 
-def _refuse_unprovable_unit(root: Path, unproven: "tuple[str, ...]") -> None:
-    """Raise when a strict listing cannot account for a child that holds entries."""
-    blocked = _unproven_holding_content(root, unproven)
-    if blocked is None:
-        return
-    raise CrewLogError(
-        f"session crew log {blocked!r} holds entries its header cannot prove, "
-        "so the listing is incomplete",
-        code=CODE_BAD_HEADER,
-        field="id",
-    )
+def _unproven_slot(root: Path, name: str) -> "str | None":
+    """The slot an unprovable unit's own ``session/opened`` names, or ``None``.
+
+    Attribution for a child whose HEADER will not prove. The header is line 1 and the
+    opening entry is line 2, written immediately after it, so a unit whose header is
+    missing or corrupt can still say which slot it belongs to -- and that is the only
+    question a per-slot caller has about it. O(1) in the log's size, like
+    :func:`unit_opened_previous`, and read from the oldest segment because a rotated
+    log keeps its opening entry there.
+
+    ``None`` is "cannot attribute", never "belongs to no slot": a directory that is a
+    link, segments that will not list, no second line yet, a line that does not parse,
+    a second line that is not a ``session/opened``, and an absent or empty ``slot``
+    all answer None. A caller must treat None as undecided and refuse, because an
+    unattributable unit holding entries may be the very one it needed to read.
+    """
+    directory = root / name
+    try:
+        if is_link(directory):
+            return None
+        segments = [
+            (first, child)
+            for child in directory.iterdir()
+            if (first := _segment_first_seq(child)) is not None
+        ]
+    except OSError:
+        return None
+    if not segments:
+        return None
+    segments.sort(key=lambda pair: pair[0])
+    # Read the first two lines POSITIONALLY rather than through
+    # :func:`read_head`, which withholds the entry whenever line 1 cannot be
+    # delivered intact -- correct there, because handing an entry back AS a header
+    # is the mistake it guards, and useless here, because a damaged line 1 is the
+    # whole reason this unit needs attributing. The format is header then opening
+    # entry, so the ``session/opened`` is line 2 when a header is present and line 1
+    # when it is absent; the first line that parses as one answers.
+    try:
+        with segments[0][1].open("r", encoding="utf-8") as handle:
+            head_lines = [handle.readline(), handle.readline()]
+    except OSError:
+        return None
+    for line in head_lines:
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict) or parsed.get("type") != "session/opened":
+            continue
+        data = parsed.get("data")
+        if not isinstance(data, dict):
+            continue
+        unit_slot = data.get("slot")
+        if isinstance(unit_slot, str) and unit_slot:
+            return unit_slot
+    return None
+
+
+def _refuse_unprovable_unit(
+    root: Path, unproven: "tuple[str, ...]", *, slot: "str | None" = None
+) -> None:
+    """Raise when a strict listing cannot account for a child that holds entries.
+
+    *slot* NARROWS the refusal to one slot's own units, and a per-slot caller passes
+    it. Without that narrowing a single corrupt unit anywhere in the store refuses
+    every slot's listing, which makes one damaged session a gateway-wide outage: a
+    slot whose own log is perfectly readable comes up unresolved and its
+    manager-dependent verbs are refused until someone repairs an unrelated directory.
+    The blast radius has nothing to do with the incompleteness the refusal is about.
+
+    An unaccounted unit is skipped only when it can be ATTRIBUTED ELSEWHERE -- its own
+    opening entry names a different slot (:func:`_unproven_slot`). One that cannot be
+    attributed still refuses, because "which slot is this" is exactly what could not
+    be established, and the unit may hold the entry this caller came for. A
+    cross-slot caller passes no slot and keeps the store-wide refusal, which is what
+    validating across slots requires.
+    """
+    for name in _unproven_holding_names(root, unproven):
+        if slot is not None and (named := _unproven_slot(root, name)) is not None:
+            if named != slot:
+                continue
+        raise CrewLogError(
+            f"session crew log {name!r} holds entries its header cannot prove, "
+            "so the listing is incomplete",
+            code=CODE_BAD_HEADER,
+            field="id",
+        )
 
 
 def _any_now_provable(root: Path, unproven: "tuple[str, ...]") -> bool:
@@ -2408,6 +2525,62 @@ def read_last_tree_edge(segment: Path) -> "Entry | None":
     if tail.empty:
         return None
     return _last_entry_of_types(tail, _TREE_EDGE_TYPES)
+
+
+#: The entry type that moves a session's MANAGER, read from a unit's tail like the
+#: tree edges beside it. Deliberately NOT in :data:`_LIFECYCLE_TYPES`, for the reason
+#: the tree edges are not: that set decides open versus closed and so authorizes
+#: retention's delete, and a handoff sitting at the end of a log must not keep that log
+#: forever.
+_MANAGER_TYPES = frozenset({"session/manager_set"})
+
+
+def read_last_manager_set(segment: Path) -> "Entry | None":
+    """The newest manager entry in *segment*'s tail window, or ``None``.
+
+    The manager counterpart of :func:`read_last_tree_edge`, with the same bound and the
+    same meaning: a handoff lands after the session opened, so a reader of a unit's
+    HEAD cannot see it. Bounded, so it is the cheap first look rather than the whole
+    answer; :func:`find_last_manager_set` is what a rebuild needs.
+
+    Raises whatever the read raises, like :func:`read_head`: "this unit records no
+    handoff" and "its bytes were not seen" are different answers, and only the FIRST
+    means the creator still holds the session. A rebuild leaves the second UNRESOLVED
+    and refuses the manager-dependent verbs, because reverting to the creator there
+    would restore a grant the log recorded going away and never recorded coming back.
+    """
+    tail = _scan_tail(segment)
+    if tail.empty:
+        return None
+    return _last_entry_of_types(tail, _MANAGER_TYPES)
+
+
+def find_last_manager_set(directory: Path) -> "Entry | None":
+    """The newest manager entry in the WHOLE of *directory*'s surviving log.
+
+    What a rebuild needs, for the reason :func:`find_last_tree_edge` is needed: a
+    handoff written before the log grew past the tail window is invisible to the
+    bounded read, and losing it does not produce a missing manager but a WRONG one --
+    the slot reads as never handed over, which hands the giver back a reach the log
+    says it gave away and refuses the session that actually holds the target. Segments
+    are searched newest first and the first answer wins.
+    """
+    found = [
+        (first, child)
+        for child in directory.iterdir()
+        if (first := _segment_first_seq(child)) is not None
+    ]
+    if not found:
+        return None
+    found.sort(key=lambda pair: pair[0], reverse=True)
+    for _first, segment in found:
+        entry = read_last_manager_set(segment)
+        if entry is not None:
+            return entry
+        entry = _scan_whole_for_types(segment, _MANAGER_TYPES)
+        if entry is not None:
+            return entry
+    return None
 
 
 def tree_edge_scan_identity(directory: Path) -> "tuple[int, int, int, int] | None":

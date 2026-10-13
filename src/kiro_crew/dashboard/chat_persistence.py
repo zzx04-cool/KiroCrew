@@ -2190,6 +2190,17 @@ async def rehydrate_slot_from_history_async(
         _prefetched_effort_marker=effort_marker,
     )
     if _restored is not None:
+        # The MANAGER, for the reason the claim recovery below belongs here: this is how
+        # anything outside this module rebuilds one slot by targeted history rehydration,
+        # and the slot's line carries no manager -- the crew log is the only store. The
+        # codec marked the slot unresolved as it hydrated it, so until this read lands
+        # session control refuses the verbs whose authorization reads the manager rather
+        # than answering them from the creator, which would hand a revoked giver its
+        # reach back. Resolved through session-control's own helper, the one place that
+        # reads the log and re-validates the grant.
+        from kiro_crew.dashboard import session_control as _session_control
+
+        await _session_control.resolve_slot_manager(state, _restored)
         # Claim recovery belongs HERE, not in each caller: this function is how
         # anything outside this module rebuilds one slot from disk by TARGETED
         # history rehydration -- `channel_slots.surface_channel_session` reaches a

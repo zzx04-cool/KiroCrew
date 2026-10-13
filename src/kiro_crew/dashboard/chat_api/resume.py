@@ -1664,6 +1664,22 @@ async def resume_slot_from_history(
             # act or a binding recorded during this read would publish. The
             # generation re-check below the hook still covers a delete landing in
             # EITHER await.
+            # The MANAGER, read HERE for the same reason the identity read below is here
+            # and not lower: it is an off-loop crew-log read, so it is an awaiting act,
+            # and the hook must stay the LAST one. Published after the hook instead, a
+            # channel link or Slack binding recorded during this read would reach the
+            # slot with no pass left to see it.
+            #
+            # The slot's line carries no manager -- the crew log is the only store -- and
+            # the codec marked the slot unresolved as it hydrated it, so until this lands
+            # session control refuses the verbs whose authorization reads the manager
+            # rather than answering them from the creator. Resolved through
+            # session-control's own helper, the one place that reads the log and
+            # re-validates the grant.
+            from kiro_crew.dashboard import session_control as _session_control
+
+            await _session_control.resolve_slot_manager(state, slot)
+
             last_cache_gen = log._cache_gen(history_key)
             try:
                 _last, _last_readable = await _status_riding_transient(log, history_key)

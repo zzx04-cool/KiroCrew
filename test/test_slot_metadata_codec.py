@@ -67,6 +67,7 @@ _POPULATED: dict = {
     "_turn_in_flight_prompt": PROMPT,
     "mode": "focus",
     "_created_by": "member-x",
+    "_manager": "chat-manager",
     "folder_id": "folder-1",
     "_channel_folder_filed": True,
     "_origin": "cron",

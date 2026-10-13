@@ -450,7 +450,7 @@ def _has_user_queued_followup(slot: "_ChatSlot") -> bool:
     return any(not _queue_entry_is_orchestration(q) for q in getattr(slot, "_queue", []))
 
 
-def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
+def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> bool:
     """Drop queued entries whose admission-time containment has lapsed.
 
     Authorization is decided when a prompt is ADMITTED (`authorize_target` for
@@ -505,13 +505,16 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
     transcript. A human-typed entry carries no stamp and is unaffected.
     """
     if not slot._queue:
-        return
+        return False
     # circular import: session_control imports this package's modules at module level.
     from kiro_crew.dashboard import session_control as _sc
 
     now = _sc.containment_snapshot(state, slot, on_probe_failure=True)
     _mirror_unverified = bool(now.get("mirror_unverified"))
     doomed: list[tuple[dict, list[str]]] = []
+    #: Entries NOT delivered this pass and NOT dropped: the manager could not be read,
+    #: so neither answer is available yet. They stay in the queue exactly as they are.
+    held: list[dict] = []
     for q in slot._queue:
         # Exempt ONLY cron notifications and sub-agent completions: both are
         # minted fresh by trusted internal producers for THIS slot's own turn
@@ -524,13 +527,58 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
         # a channel-born session still drains: its stamp records linked=True.
         if q.get("kind") in (CRON_NOTIFICATION_KIND, SUBAGENT_COMPLETION_KIND):
             continue
+        # Whether the FENCE applied to this entry's admission, read once and used by
+        # both manager re-checks below. An admission the fence never touched did not
+        # read the manager, so neither "the manager moved" nor "the manager cannot be
+        # read" is a constraint it gained -- and dropping is the destructive outcome
+        # here, because the entry is a message that was already accepted.
+        manager_fenced = _sc.send_origin_manager_fenced(q.get("meta"))
         changed = _sc.newly_held_constraints(
             now,
             q.get("meta"),
             directive_user_origin=q.get("_directive_user_origin") is True,
+            manager_fence_applied=manager_fenced,
         )
+        # The CALLER-side half of the admission, which the snapshot above cannot carry:
+        # it describes the target alone, while this is a relation between the target's
+        # current manager and this entry's stamped sender. It needed no re-check while
+        # the fence read `created_by`, written at birth and never mutated; a handoff
+        # moves the relation, so a lead can queue a message on a busy worker, hand the
+        # worker over, and have the message run under an authorization it has lost.
+        #
+        # "WE CANNOT TELL" DEFERS; only "it demonstrably lapsed" drops.
+        #
+        # Fail-closed governs granting reach. It never governs keeping data. A queued
+        # message is content somebody was already told had been accepted, and an
+        # unreadable manager is not a finding about that message -- it is this
+        # gateway's own read not having landed. Destroying the message on it spends a
+        # person's work to protect a reach we cannot even show was at issue, and the
+        # read is self-clearing, so waiting costs one pass.
+        #
+        # `SENDER_LOST_REACH` is the other case and it still drops: the grant is known
+        # to have ended, the sender is told, and holding it would deliver it the moment
+        # the manager came back.
+        held_for_manager = "manager_unknown" in changed
+        if held_for_manager:
+            changed = [name for name in changed if name != "manager_unknown"]
+        try:
+            if _sc.sender_lost_its_reach(state, slot, q.get("meta")):
+                changed = [*changed, _sc.SENDER_LOST_REACH]
+        except _sc.SessionControlError:
+            held_for_manager = True
         if changed:
             doomed.append((q, changed))
+        elif held_for_manager:
+            # Left in the queue, and MARKED so the merge run breaks at it. The sweep
+            # refuses the head; the mark is what keeps a held entry from being folded
+            # into a batch that starts behind a deliverable one. `require_manager_of`
+            # arms the re-read whenever it refuses, so the hold ends on its own.
+            q["_held_for_manager"] = True
+            held.append(q)
+        elif q.get("_held_for_manager"):
+            # The read landed and this entry is deliverable again. Cleared here, in the
+            # same pass that decided it, so a hold cannot outlive its reason.
+            q.pop("_held_for_manager", None)
     for q, changed in doomed:
         slot.queue_remove_by_id(q["id"])
         # The broadcast is unconditional: the frontend's queue card was created
@@ -599,3 +647,7 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
                 else ""
             ),
         )
+    # HELD, not dropped: the caller starts nothing while an entry at the head is
+    # waiting on a manager read. The entries are still in the queue and still
+    # deliverable the moment the read lands.
+    return bool(held) and slot._queue[:1] == held[:1]
