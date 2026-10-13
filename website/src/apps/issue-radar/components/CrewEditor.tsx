@@ -36,7 +36,7 @@
  * to dismiss the prompt without reading it — which is exactly when it stops
  * protecting anything.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, X } from 'lucide-react'
@@ -51,9 +51,11 @@ import {
 } from '../../../components/ui/dialog'
 import { Badge, Btn, IconButton, Input, Toggle } from '../../../components/ui'
 import SimpleSelect from '../../../components/SimpleSelect'
+import { formatMultiplier } from '../../../components/ModelDropdownList'
 import ErrorNotice from '../../../components/ErrorNotice'
 import { useAgents } from '../../../hooks/useAgents'
 import { useAvailableModels } from '../../../hooks/useAvailableModels'
+import { isPricedMultiplier } from '../../../providers/modelList'
 import CrewGhost, { djb2, ghostVariantCount } from './CrewGhost'
 import { issueRadarApi, type Crew, type CrewPatch, type CrewSpec } from '../api'
 import { repoScopeKey } from '../lib/links'
@@ -388,15 +390,45 @@ export default function CrewEditor({ open, onClose, crew }: CrewEditorProps) {
     return served
   }, [availableModels, draft.model])
 
-  /** The same served list for the triage picker, keeping ITS stored value present
-   *  for the same reason; `''` is its clear row, which switches triage off. */
+  /** The triage picker's rows: the served models minus the work model, which as a
+   *  triage model is the same as Off (the runtime treats it so). A stored value
+   *  stays listed and selected for the same reason as above; `''` is the clear
+   *  row, which switches triage off. */
   const triageModelOptions = useMemo<string[]>(() => {
-    const served = availableModels.map(m => m.name).filter(name => name !== 'auto')
+    const served = availableModels
+      .map(m => m.name)
+      .filter(name => name !== 'auto' && name !== draft.model)
     if (draft.triageModel && !served.includes(draft.triageModel)) {
       return [draft.triageModel, ...served]
     }
     return served
-  }, [availableModels, draft.triageModel])
+  }, [availableModels, draft.model, draft.triageModel])
+
+  /** Each row's credit cost, in the multiplier form the chat model picker uses,
+   *  so the cheaper choice is visible while choosing. A row the backend reported
+   *  no usable multiplier for has no badge. The Model picker carries the same
+   *  badges, which is what the triage rows are read against. */
+  const costBadges = useCallback(
+    (names: string[]) => {
+      const rate = new Map(availableModels.map(m => [m.name, m.rateMultiplier]))
+      return names.map(name => {
+        const mult = rate.get(name)
+        if (!isPricedMultiplier(mult)) return undefined
+        const value = formatMultiplier(mult)
+        return {
+          label: value,
+          source: '',
+          hint: t('components.modelDropdownList.credit_multiplier', { value }),
+        }
+      })
+    },
+    [availableModels, t],
+  )
+  const modelBadges = useMemo(() => costBadges(modelOptions), [costBadges, modelOptions])
+  const triageModelBadges = useMemo(
+    () => costBadges(triageModelOptions),
+    [costBadges, triageModelOptions],
+  )
 
   const suggestions = useMemo(() => {
     const raw = namesQuery.data?.suggestions
@@ -800,6 +832,7 @@ export default function CrewEditor({ open, onClose, crew }: CrewEditorProps) {
               <SimpleSelect
                 aria-label={t('apps.issueRadar.views.crews.editor.model_label')}
                 options={modelOptions}
+                optionBadges={modelBadges}
                 value={draft.model}
                 // The inherit-the-agent's-default row. `clearLabel` is the one
                 // affordance that can SET `''` back, so without it a user who
@@ -819,6 +852,7 @@ export default function CrewEditor({ open, onClose, crew }: CrewEditorProps) {
             <SimpleSelect
               aria-label={t('apps.issueRadar.views.crews.editor.triage_model_label')}
               options={triageModelOptions}
+              optionBadges={triageModelBadges}
               value={draft.triageModel}
               // The off row: `''` runs every turn on the work model, so it has to
               // be a choice the user can return to.

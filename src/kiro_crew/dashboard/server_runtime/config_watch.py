@@ -77,6 +77,10 @@ def _register_config_watch(
                 # fallback restore probe drops any sticky state instead of
                 # restoring a model id from the previous provider.
                 slot._model_pick_gen += 1
+                # ...and stamp that generation as the runtime's own, so a reader
+                # that keys "a person picked this" off the generation (a crew's
+                # triage model switch) does not read this clear as a person's pick.
+                slot._model_runtime_pick_gen = slot._model_pick_gen
         state.push_slots_update()
         logger.info(
             "Provider switched to %s -- config rebuilt, factory reloaded, slot models cleared",

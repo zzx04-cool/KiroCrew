@@ -229,7 +229,8 @@ def _app(state: _FakeState | None) -> Any:
 
 
 def _crew(root, name="Andromeda", **spec) -> dict[str, Any]:
-    return cs.create_crew(OWNER, REPO, {"name": name, **spec}, root)
+    # Off the loop for the reason ``_item`` gives: most callers are async tests.
+    return off_loop(cs.create_crew, OWNER, REPO, {"name": name, **spec}, root)
 
 
 #: crew id -> the live crew log unit its slot runs on. A crew's ledger is the fold of
@@ -2114,11 +2115,37 @@ class TestTriageModel(unittest.IsolatedAsyncioTestCase):
     """A crew's triage model is chosen from its ledger before every turn.
 
     Pinned at the two places a turn's model is decided: the wake, right before the
-    dispatch, and the watchdog pass that keeps the idle-timer turn in step.
+    dispatch, and the watchdog pass that keeps the idle-timer turn in step and
+    escalates a triage turn that found work.
     """
 
     WORK = "claude-opus-4.5"
     TRIAGE = "claude-haiku-4.5"
+
+    class _Slot(_FakeSlot):
+        """The slot surface the shared model-switch helpers read."""
+
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            self._model_pick_lock = asyncio.Lock()
+            self._eager_spawn_task = None
+            self._pending_reset_history_key: str | None = None
+            self._model_pick_gen = 0
+
+    class _Sessions:
+        def get_provider(self, key: str) -> None:
+            return None
+
+    class _State(_FakeState):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = TestTriageModel._Sessions()
+            self._slots = self.slots
+
+        def get_or_create_slot(self, name: str = "", model: str = "", **kw: Any) -> _FakeSlot:
+            if name not in self.slots:
+                self.slots[name] = TestTriageModel._Slot(name, model=model)
+            return super().get_or_create_slot(name=name, model=model, **kw)
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -2128,11 +2155,13 @@ class TestTriageModel(unittest.IsolatedAsyncioTestCase):
 
         crew_model._withheld.clear()
         crew_model._written.clear()
+        crew_model._held.clear()
         self.addCleanup(crew_model._withheld.clear)
         self.addCleanup(crew_model._written.clear)
+        self.addCleanup(crew_model._held.clear)
 
     async def _wake(self, crew: dict[str, Any]) -> tuple[_FakeSlot, list[str]]:
-        state = _FakeState()
+        state = self._State()
         slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
         seen: list[str] = []
         real = slot.enqueue_or_run_prompt
@@ -2164,7 +2193,7 @@ class TestTriageModel(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_watchdog_keeps_the_idle_turn_in_step_with_the_ledger(self):
         crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
-        state = _FakeState()
+        state = self._State()
         svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
         with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
             slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
@@ -2174,6 +2203,124 @@ class TestTriageModel(unittest.IsolatedAsyncioTestCase):
             await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
             self.assertEqual(slot.model, self.WORK)
 
+    async def test_a_triage_turn_that_found_work_is_escalated_at_once(self):
+        """CI red -> a triage turn records the move -> the next pass dispatches the
+        work-model turn itself, instead of leaving it for the idle timer."""
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        _item(self.root, crew["id"], 12, phase="awaiting-ci", pr_number=40)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            await cr.wake_crew(state, OWNER, REPO, crew, "ci-changed", self.root)
+            self.assertEqual(slot.model, self.TRIAGE)
+            self.assertEqual(len(slot.prompts), 1)
+            # What the triage turn did: moved the item into an acting phase.
+            _item(self.root, crew["id"], 12, phase="addressing-review")
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+        self.assertEqual(slot.model, self.WORK)
+        self.assertEqual(len(slot.prompts), 2)
+        self.assertIn("[crew wake: an item needs the work model]", slot.prompts[-1])
+
+    async def test_a_pass_with_nothing_newly_acting_dispatches_nothing(self):
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+        self.assertEqual(slot.model, self.TRIAGE)
+        self.assertEqual(slot.prompts, [])
+
+    async def test_a_hand_pick_survives_watchdog_passes_and_wakes(self):
+        """The review finding: a model picked in the crew's session is the person's.
+
+        Neither a watchdog pass nor a wake switches over it, the switch back to the
+        work model included, and the hold is put on the record so a restart keeps it.
+        """
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+            self.assertEqual(slot.model, self.TRIAGE)
+            # What the model picker commits.
+            slot.model = "claude-sonnet-4.5"
+            slot._model_pick_gen += 1
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+            self.assertEqual(slot.model, "claude-sonnet-4.5")
+            _item(self.root, crew["id"], 12, phase="claimed")
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+            await cr.wake_crew(state, OWNER, REPO, crew, "ci-changed", self.root)
+        self.assertEqual(slot.model, "claude-sonnet-4.5")
+        record = off_loop(cs.read_crew, OWNER, REPO, crew["id"], self.root)
+        self.assertIs(record["model_held"], True)
+        # An edit to the crew's models hands the slot back.
+        off_loop(cs.update_crew, OWNER, REPO, crew["id"], {"triage_model": "claude-haiku-5"}, self.root)
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+        self.assertEqual(slot.model, self.WORK)
+
+    async def test_a_held_record_survives_a_restart(self):
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            slot.model = "claude-sonnet-4.5"
+            off_loop(
+                cs.set_crew_model_held,
+                OWNER,
+                REPO,
+                crew["id"],
+                model=self.WORK,
+                triage_model=self.TRIAGE,
+                root=self.root,
+            )
+            # A fresh process: nothing in memory, the record says held.
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+        self.assertEqual(slot.model, "claude-sonnet-4.5")
+
+    async def test_a_wake_records_a_hand_pick_it_sees(self):
+        """The GPT finding: a hold is persisted before the page offers to release it.
+
+        The pick is first seen by a wake, with no watchdog pass in between, and the
+        wake puts it on the record, which is the only hold the crew page shows.
+        """
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+            self.assertEqual(slot.model, self.TRIAGE)
+            slot.model = "claude-sonnet-4.5"
+            slot._model_pick_gen += 1
+            await cr.wake_crew(state, OWNER, REPO, crew, "ci-changed", self.root)
+        self.assertEqual(slot.model, "claude-sonnet-4.5")
+        record = off_loop(cs.read_crew, OWNER, REPO, crew["id"], self.root)
+        self.assertIs(record["model_held"], True)
+
+    async def test_every_watchdog_pass_retries_a_hold_not_yet_recorded(self):
+        """A held slot reads no items, and the pass still writes the hold, so a write
+        that failed once lands on the next pass rather than never."""
+        from kiro_crew.apps.builtins.issue_radar.backend import crew_model
+
+        crew = _crew(self.root, unattended=True, model=self.WORK, triage_model=self.TRIAGE)
+        state = self._State()
+        svc = _FakeNudge([_FakeLoop("nl_0", cr._slot_key(crew))])
+        with mock.patch.object(cr, "_autonudge_instance", lambda: svc):
+            slot = await cr.ensure_crew_session(state, OWNER, REPO, crew)
+            slot.model = "claude-sonnet-4.5"
+            # Seen in this process, not on the record (the earlier write failed).
+            crew_model._held[crew["id"]] = (self.WORK, self.TRIAGE)
+            await cr.watchdog_cycle(state, OWNER, REPO, [crew], self.root)
+        self.assertEqual(slot.model, "claude-sonnet-4.5")
+        record = off_loop(cs.read_crew, OWNER, REPO, crew["id"], self.root)
+        self.assertIs(record["model_held"], True)
+
     def test_the_nudge_tells_the_crew_how_a_triage_turn_ends(self):
         crew = _crew(self.root, triage_model=self.TRIAGE)
         nudge = cr.compose_nudge(cr.build_snapshot(OWNER, REPO, crew, self.root))
@@ -2181,6 +2328,22 @@ class TestTriageModel(unittest.IsolatedAsyncioTestCase):
         self.assertIn("end the turn", nudge)
         plain = cr.compose_nudge(cr.build_snapshot(OWNER, REPO, _crew(self.root, "Leo"), self.root))
         self.assertNotIn("Triage model", plain)
+
+    def test_the_nudge_says_nothing_of_triage_while_it_is_not_in_effect(self):
+        """A held or withheld triage model leaves every turn on the session's model,
+        so a turn must not be told to stop short and leave the work for the idle gap."""
+        from kiro_crew.apps.builtins.issue_radar.backend import crew_model
+
+        crew = _crew(self.root, model=self.WORK, triage_model=self.TRIAGE)
+        cs.set_crew_model_held(
+            OWNER, REPO, crew["id"], model=self.WORK, triage_model=self.TRIAGE, root=self.root
+        )
+        held = cs.read_crew(OWNER, REPO, crew["id"], self.root)
+        nudge = cr.compose_nudge(cr.build_snapshot(OWNER, REPO, held, self.root))
+        self.assertNotIn("Triage model", nudge)
+        crew_model._withheld[crew["id"]] = self.TRIAGE
+        nudge = cr.compose_nudge(cr.build_snapshot(OWNER, REPO, crew, self.root))
+        self.assertNotIn("Triage model", nudge)
 
 
 # ── unblock signal detection (pure) ─────────────────────────────────────────

@@ -336,7 +336,9 @@ class _CrewRouteCase(unittest.IsolatedAsyncioTestCase):
         the write route resolves. ``live=False`` makes a crew whose slot has no
         live session, so a write has nowhere to record."""
         live = spec.pop("live", True)
-        crew = crew_store.create_crew(OWNER, REPO, {"name": name, **spec}, self.root)
+        # Off the loop, as the write route runs it: an async test calling the store
+        # on the event-loop thread gets one lock attempt, not a short wait.
+        crew = off_loop(crew_store.create_crew, OWNER, REPO, {"name": name, **spec}, self.root)
         if live:
             self.unit(crew)
         return crew
@@ -659,6 +661,66 @@ class TestCrewReadUpdateRetire(_CrewRouteCase):
         self.addCleanup(crew_model._withheld.clear)
         page = _payload(await self.call("GET", "/crew", query=query))
         self.assertEqual(page["triage_model_unavailable"], "claude-haiku-4.5")
+
+    async def test_the_crew_page_names_a_hand_picked_model_and_resume_releases_it(self):
+        from kiro_crew.apps.builtins.issue_radar.backend import crew_model
+
+        crew = self.crew("Andromeda", model="claude-opus-4.5", triage_model="claude-haiku-4.5")
+        query = {"owner": OWNER, "repo": REPO, "id": crew["id"]}
+        page = _payload(await self.call("GET", "/crew", query=query))
+        self.assertIs(page["model_held"], False)
+        self.assertEqual(page["held_model"], "")
+
+        slot = _Slot()
+        slot.model = "claude-sonnet-4.5"  # type: ignore[attr-defined]
+        self.state._slot = slot
+        off_loop(
+            crew_store.set_crew_model_held,
+            OWNER,
+            REPO,
+            crew["id"],
+            model="claude-opus-4.5",
+            triage_model="claude-haiku-4.5",
+            root=self.root,
+        )
+        page = _payload(await self.call("GET", "/crew", query=query))
+        self.assertIs(page["model_held"], True)
+        self.assertEqual(page["held_model"], "claude-sonnet-4.5")
+
+        # "Resume switching": a patch may release the hold, in the record and in
+        # process memory, but never set it.
+        crew_model._held[crew["id"]] = ("claude-opus-4.5", "claude-haiku-4.5")
+        self.addCleanup(crew_model._held.clear)
+        body = {"owner": OWNER, "repo": REPO, "id": crew["id"]}
+        res = await self.call("PUT", "/crew", body={**body, "model_held": False})
+        self.assertIs(_payload(res)["crew"]["model_held"], False)
+        self.assertNotIn(crew["id"], crew_model._held)
+        page = _payload(await self.call("GET", "/crew", query=query))
+        self.assertIs(page["model_held"], False)
+        res = await self.call("PUT", "/crew", body={**body, "model_held": True})
+        self.assertIs(_payload(res)["crew"]["model_held"], False)
+
+    async def test_a_hold_not_yet_recorded_is_not_shown_and_a_release_still_clears_it(self):
+        """The GPT finding: persist a hold before the page offers to release it.
+
+        A hold this process has seen but not yet written is not on the page, and an
+        explicit ``model_held: false`` patch clears it from process memory even though
+        the record never carried it (a false-to-false record update).
+        """
+        from kiro_crew.apps.builtins.issue_radar.backend import crew_model
+
+        crew = self.crew("Andromeda", model="claude-opus-4.5", triage_model="claude-haiku-4.5")
+        query = {"owner": OWNER, "repo": REPO, "id": crew["id"]}
+        crew_model._held[crew["id"]] = ("claude-opus-4.5", "claude-haiku-4.5")
+        self.addCleanup(crew_model._held.clear)
+        page = _payload(await self.call("GET", "/crew", query=query))
+        self.assertIs(page["model_held"], False)
+        self.assertEqual(page["held_model"], "")
+        body = {"owner": OWNER, "repo": REPO, "id": crew["id"], "model_held": False}
+        res = await self.call("PUT", "/crew", body=body)
+        self.assertIs(_payload(res)["crew"]["model_held"], False)
+        self.assertNotIn(crew["id"], crew_model._held)
+        self.assertFalse(crew_model.is_held(_payload(res)["crew"]))
 
     async def test_a_rename_onto_a_taken_name_is_409(self):
         first = self.crew("Andromeda")

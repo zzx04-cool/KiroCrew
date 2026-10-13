@@ -6169,6 +6169,41 @@ def effort_commit_needs_reset(provider: object) -> bool:
     return provider.supports_effort() is not False  # type: ignore[attr-defined]
 
 
+def model_switch_deferred(state: "DashboardState", slot: "_ChatSlot") -> str:
+    """Why a between-turns model switch on *slot* must wait, or ``""`` if it may land.
+
+    Shared by every writer that changes ``slot.model`` between turns and arms the
+    deferred reset: a queued ``session_set_model`` pick and an Issue Radar crew's
+    triage switch. Two reasons, both about a switch the next turn would not see:
+
+    * a model-picker switch is mid-transaction -- its pick generation is
+      provisional and may still roll back, so the next turn start decides against
+      the settled generation;
+    * another slot drives the same session and has a turn in flight (or is
+      cold-starting it) -- a commit now would reset nothing that turn can see, since
+      get_or_create attaches to that session on its old model.
+    """
+    if slot._model_pick_lock.locked():
+        return "picker in flight"
+    if _another_alias_is_mid_turn(state, slot):
+        return "alias mid-turn"
+    return ""
+
+
+def arm_model_switch_reset(state: "DashboardState", slot: "_ChatSlot") -> None:
+    """Make the next turn start on ``slot.model`` instead of the live session's.
+
+    Armed only when a session can still be on the old model: one already
+    registered, or an eager spawn in flight that may register one before
+    get_or_create. With neither, get_or_create cold-starts on the new model, and
+    an armed reset would tear that session down at turn end for nothing.
+    """
+    key = effective_session_key(slot)
+    eager = slot._eager_spawn_task
+    if state.sessions.get_provider(key) is not None or (eager is not None and not eager.done()):
+        slot._pending_reset_history_key = slot._pending_reset_history_key or key
+
+
 def apply_pending_model_pick(state: "DashboardState", slot: "_ChatSlot") -> bool:
     """Commit *slot*'s pending ``session_set_model`` pick, if it is still allowed.
 
@@ -6193,21 +6228,11 @@ def apply_pending_model_pick(state: "DashboardState", slot: "_ChatSlot") -> bool
     pick = slot._pending_model_pick
     if pick is None:
         return False
-    if slot._model_pick_lock.locked():
-        # A model-picker switch is mid-transaction: its pick generation is
-        # provisional and may still roll back. Leave the pick pending and run
-        # this turn on the current model; the next turn start decides against
-        # the settled generation (a committed picker choice then supersedes the
-        # pick, a rolled-back one lets it apply). Nothing is decided yet, so
-        # nothing is audited here.
-        logger.info("session-control set_model: pick on %s deferred, picker in flight", slot.key)
-        return False
-    if _another_alias_is_mid_turn(state, slot):
-        # Another slot drives the same session and has a turn in flight (or is
-        # cold-starting it). A commit now would reset nothing the turn can see:
-        # get_or_create attaches to that session on its old model. Leave the
-        # pick pending; a later turn start applies it once the session is idle.
-        logger.info("session-control set_model: pick on %s deferred, alias mid-turn", slot.key)
+    deferred = model_switch_deferred(state, slot)
+    if deferred:
+        # The pick stays pending and a later turn start decides it (see
+        # model_switch_deferred). Nothing is decided yet, so nothing is audited.
+        logger.info("session-control set_model: pick on %s deferred, %s", slot.key, deferred)
         return False
     slot._pending_model_pick = None
     # Each half of the pick yields separately to a newer choice the user made

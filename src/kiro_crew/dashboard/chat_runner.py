@@ -10662,6 +10662,7 @@ async def _run_chat(
         # circular import: session_control imports this package's modules at module level.
         from kiro_crew.dashboard.session_control import (
             apply_pending_model_pick,
+            arm_model_switch_reset,
             prewarm_enabled_check,
         )
 
@@ -10670,17 +10671,7 @@ async def _run_chat(
             # synchronous gate below does no file IO on the loop.
             await prewarm_enabled_check()
         if apply_pending_model_pick(state, slot):
-            # Reset only a session that can still be on the old model: one
-            # already registered, or an eager spawn in flight that may register
-            # one before get_or_create. With neither, get_or_create cold-starts
-            # on the new model, and an armed reset would tear that session down
-            # at turn end for nothing.
-            _picked_key = effective_session_key(slot)
-            _eager = slot._eager_spawn_task
-            if state.sessions.get_provider(_picked_key) is not None or (
-                _eager is not None and not _eager.done()
-            ):
-                slot._pending_reset_history_key = slot._pending_reset_history_key or _picked_key
+            arm_model_switch_reset(state, slot)
             # The commit above is memory-only; persist it before the provider is
             # acquired, so a gateway exit mid-turn does not restore the old pin.
             # Awaiting here is safe: the gate and the write already happened in

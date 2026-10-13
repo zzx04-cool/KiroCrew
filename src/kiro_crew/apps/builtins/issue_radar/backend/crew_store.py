@@ -179,6 +179,11 @@ _DEFAULT_CREW: dict[str, Any] = {
     # The model for turns that only check the queue (see ``crew_model``). Empty
     # means the crew runs every turn on ``model``.
     "triage_model": "",
+    # Written by the runtime when a person picked the model of the crew's session
+    # by hand, so the crew stops switching it. A patch may only clear it ("Resume
+    # switching"); an edit that changes ``model`` or ``triage_model`` clears it too
+    # (see :func:`update_crew`).
+    "model_held": False,
     "extra_prompt": "",
     "worktree_root": "",
     "enabled": True,
@@ -565,6 +570,7 @@ def _coerce_crew(rec: dict[str, Any]) -> dict[str, Any]:
     # path would have refused reads as unset, so the crew runs on its work model.
     triage = _validated_model_id(out.get("triage_model"))
     out["triage_model"] = triage if triage is not None else ""
+    out["model_held"] = out.get("model_held") is True
     # The avatar seed is stored separately from the name on purpose: renaming a
     # crew must not change its face.
     if not out.get("avatar_seed"):
@@ -735,6 +741,11 @@ def _validated_crew_patch(patch: dict[str, Any]) -> dict[str, Any]:
         triage = _validated_model_id(patch["triage_model"])
         if triage is not None:
             out["triage_model"] = triage
+    if patch.get("model_held") is False:
+        # "Switch back to triage model" on the crew page. A patch may RELEASE a
+        # hand-picked model hold but never set one: only the runtime, seeing the
+        # pick, does.
+        out["model_held"] = False
     for key in ("auto_resolve_conflicts", "auto_merge", "unattended", "enabled"):
         if key in patch and isinstance(patch[key], bool):
             out[key] = patch[key]
@@ -774,10 +785,59 @@ def update_crew(
                 if new_name in taken_names(owner, repo, root):
                     raise CrewStoreError(f"crew name {new_name!r} is already taken")
                 record["name"] = new_name
+            settings_before = model_settings(record)
             record.update(_validated_crew_patch(patch))
+            if model_settings(record) != settings_before:
+                # Changing which models the crew runs on hands its session's model
+                # back to the crew: a person's hand pick held it until now.
+                record["model_held"] = False
             record["schema"] = CREW_SCHEMA
             atomic_write(crew_path(owner, repo, crew_id, root), json.dumps(record, indent=2))
     return _coerce_crew(record)
+
+
+def model_settings(crew: Mapping[str, Any]) -> tuple[str, str]:
+    """The two settings a hand-picked model hold is released by changing.
+
+    Read the way ``crew_model.work_model`` and ``crew_model.triage_model`` read
+    them, so the runtime's compare-and-set below names the same pair.
+    """
+    model, triage = crew.get("model"), crew.get("triage_model")
+    return (
+        model if isinstance(model, str) else "",
+        triage.strip() if isinstance(triage, str) else "",
+    )
+
+
+def set_crew_model_held(
+    owner: str,
+    repo: str,
+    crew_id: str,
+    *,
+    model: str,
+    triage_model: str,
+    root: Path | None = None,
+) -> bool:
+    """Record that a person picked the crew session's model by hand. Returns whether it wrote.
+
+    COMPARE-AND-SET on the two model settings the hold was seen under: an edit that
+    changed either one released the hold (:func:`update_crew`), and a hold seen
+    before that edit must not come back after it. Not a patch field, so a request
+    body cannot set it.
+    """
+    lock_path = _records_lock_path(owner, repo, root)
+    lock_path.touch(exist_ok=True)
+    with open(lock_path, "r+") as fd:
+        with platform_compat.file_lock(fd.fileno(), exclusive=True):
+            record = read_crew(owner, repo, crew_id, root)
+            if record is None or model_settings(record) != (model, triage_model):
+                return False
+            if record.get("model_held") is True:
+                return False
+            record["model_held"] = True
+            record["schema"] = CREW_SCHEMA
+            atomic_write(crew_path(owner, repo, crew_id, root), json.dumps(record, indent=2))
+    return True
 
 
 def set_crew_paused(

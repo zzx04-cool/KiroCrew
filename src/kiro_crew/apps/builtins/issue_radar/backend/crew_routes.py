@@ -795,7 +795,23 @@ async def _handle_crew_read(request: web.Request) -> web.Response:
         partial(_crew_page, key.owner, key.repo, crew_id, limit, routes._scope(key))
     )
     # Process memory, not the store: the verdict comes from the crew's live session.
-    page["triage_model_unavailable"] = crew_model.unavailable_triage_model(page.get("crew") or {})
+    page_crew = page.get("crew") or {}
+    page["triage_model_unavailable"] = crew_model.unavailable_triage_model(page_crew)
+    # A person's pick holds the crew's session model, so the page says so and names
+    # it rather than letting the crew look as if it still triages. The held model is
+    # the slot's own: a slot the gateway does not hold leaves it unnamed. Only a
+    # RECORDED hold is shown, so what the page offers to release is what a restart
+    # would keep. The watchdog pass and the wake both write a hold they see at once,
+    # and the release patch clears it on the record and in process memory alike.
+    held = bool(crew_model.triage_model(page_crew)) and page_crew.get("model_held") is True
+    state = request.app.get("state")
+    slot = (
+        state.get_slot(crew_runtime._slot_key(page_crew))
+        if held and state is not None and hasattr(state, "get_slot")
+        else None
+    )
+    page["model_held"] = held
+    page["held_model"] = str(getattr(slot, "model", "") or "") if slot is not None else ""
     return web.json_response({**routes._identity(key), **page})
 
 
@@ -843,10 +859,16 @@ async def _handle_crew_update(request: web.Request) -> web.Response:
         withdrawn = "unattended off" if not crew.get("unattended") else "not live"
         await _revoke_execution(request, crew, withdrawn)
     state = request.app.get("state")
-    if state is not None and hasattr(state, "get_slot"):
-        # A triage model switched off may still be on the slot; the watchdog's next
-        # pass puts the work model back.
-        crew_model.note_triage_change(state.get_slot(crew_runtime._slot_key(crew)), before, crew)
+    # A triage model switched off may still be on the slot; the watchdog's next
+    # pass puts the work model back. A changed triage model also clears the crew's
+    # withheld verdict, so the new setting gets a fresh try. Run with no slot too:
+    # releasing a hold this process holds does not depend on the slot being here.
+    slot = (
+        state.get_slot(crew_runtime._slot_key(crew))
+        if state is not None and hasattr(state, "get_slot")
+        else None
+    )
+    crew_model.note_triage_change(slot, before, crew, released=body.get("model_held") is False)
     return web.json_response({"crew": crew})
 
 

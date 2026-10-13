@@ -3011,6 +3011,7 @@ class _ChatSlot:
         "_fallback_primary_model",
         "_fallback_slot_model",
         "_model_pick_gen",
+        "_model_runtime_pick_gen",
         "_fallback_pick_gen",
         "_fallback_client_pick_epoch",
         "_refusal_fallback_primary",
@@ -3827,6 +3828,12 @@ class _ChatSlot:
         # unpinned slot (heal and restore). _fallback_pick_gen is the value
         # snapshotted when the fallback activated.
         self._model_pick_gen: int = 0
+        # The pick generation a RUNTIME write produced (the provider-switch clear),
+        # or None. That write bumps _model_pick_gen like a pick does, for the
+        # fallback probe's sake, but nobody chose it: a reader that treats a moved
+        # generation as a person's pick (the Issue Radar crew's triage model
+        # switch) skips a generation that equals this one.
+        self._model_runtime_pick_gen: int | None = None
         self._fallback_pick_gen: int = 0
         # The shared client's explicit-pick epoch at fallback activation. The
         # slot-local _fallback_pick_gen is invisible to a pick made through a

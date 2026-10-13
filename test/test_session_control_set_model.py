@@ -376,17 +376,51 @@ def test_a_pick_equal_to_the_pin_still_resets_while_a_fallback_serves(tmp_path):
 
 
 def test_the_turn_arms_the_reset_for_a_live_or_spawning_session_only():
-    """Source pin: the reset is armed when a session is registered or an eager
-    spawn is in flight, and not otherwise, so a cold start on the new model is
-    not torn down at turn end."""
+    """Source pin: a committed pick arms the reset through the shared helper,
+    whose behaviour is pinned below."""
     import kiro_crew.dashboard.chat_runner as runner
 
     source = Path(runner.__file__).read_text(encoding="utf-8")
     body = source[source.index("if apply_pending_model_pick(state, slot):") :]
     body = body[: body.index("await _consume_pending_reset(state, slot)")]
-    assert "_pending_reset_history_key" in body
-    assert "get_provider(" in body
-    assert "_eager_spawn_task" in body
+    assert "arm_model_switch_reset(state, slot)" in body
+
+
+def test_the_reset_is_armed_for_a_live_or_spawning_session_only(tmp_path):
+    """A registered session or an eager spawn in flight can still be on the old
+    model, so the reset is armed; with neither, the next turn cold-starts on the
+    new model and an armed reset would tear that session down for nothing."""
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot("chat-1")
+    key = sc.effective_session_key(slot)
+
+    sc.arm_model_switch_reset(state, slot)
+    assert slot._pending_reset_history_key is None
+
+    spawning = MagicMock()
+    spawning.done.return_value = False
+    slot._eager_spawn_task = spawning
+    sc.arm_model_switch_reset(state, slot)
+    assert slot._pending_reset_history_key == key
+
+    slot._pending_reset_history_key = None
+    slot._eager_spawn_task = None
+    state.sessions.get_provider = MagicMock(return_value=object())
+    sc.arm_model_switch_reset(state, slot)
+    assert slot._pending_reset_history_key == key
+    state.sessions.get_provider.assert_called_with(key)
+
+
+def test_a_switch_waits_for_a_picker_transaction_in_flight(tmp_path):
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot("chat-1")
+    assert sc.model_switch_deferred(state, slot) == ""
+
+    async def held() -> str:
+        async with slot._model_pick_lock:
+            return sc.model_switch_deferred(state, slot)
+
+    assert asyncio.run(held()) == "picker in flight"
 
 
 def test_the_turn_persists_a_committed_pick_before_it_acquires_a_session():
