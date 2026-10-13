@@ -1387,6 +1387,65 @@ def _subagent_default_effort(cfg: Any = None) -> str:
         return ""
 
 
+#: Where a role-tagged spawn's model came from, as ``POST /api/spawn`` reports it:
+#: the call's own ``model``, the phase role's pin, the ``subagent`` pin the role
+#: fell back to, or neither (the session default).
+ROLE_SOURCE_SPAWN = "spawn"
+ROLE_SOURCE_ROLE = "role"
+ROLE_SOURCE_SUBAGENT = "subagent"
+ROLE_SOURCE_INHERIT = "inherit"
+
+
+@dataclass(frozen=True)
+class SpawnRoleSelection:
+    """The model a ``spawn_run(role=...)`` request selects, and where it came from.
+
+    ``model`` is what the spawn passes on as its model, exactly as an explicit
+    per-spawn ``model`` would be: the call's own model, else the phase role's
+    pin, else ``""`` -- and ``""`` keeps the untagged path, which reads the
+    ``subagent`` pin and then the session default at start. ``shown`` is the
+    model the receipt names (``""`` when only the session default is known), and
+    ``source`` is one of the ``ROLE_SOURCE_*`` values.
+    """
+
+    role: str
+    model: str
+    shown: str
+    source: str
+
+
+def select_spawn_role_model(role: str, model: str, cfg: Any = None) -> SpawnRoleSelection:
+    """Resolve the model a phase-role tag selects. Never raises.
+
+    An explicit *model* wins. Otherwise the role's own ``agent.role_models``
+    pin is used, and an unpinned role selects nothing, so the spawn falls back
+    exactly as an untagged one does. The tag only ever picks one of the
+    owner-saved pins, each of which the config PATCH judged against this
+    account's entitlement when it was saved; it never names a model itself. A
+    role outside :data:`~kiro_crew.config.sections.SPAWN_ROLE_KEYS` or an
+    unreadable config selects nothing.
+    """
+    from kiro_crew.config.sections import SPAWN_ROLE_KEYS
+
+    if model:
+        return SpawnRoleSelection(role, model, model, ROLE_SOURCE_SPAWN)
+    if role not in SPAWN_ROLE_KEYS:
+        return SpawnRoleSelection(role, "", "", ROLE_SOURCE_INHERIT)
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig, normalize_agent_model
+
+        cfg = cfg if cfg is not None else KiroCrewConfig.load()
+        pin = normalize_agent_model(cfg.agent.role_models.get(role, ""))
+    except Exception:
+        return SpawnRoleSelection(role, "", "", ROLE_SOURCE_INHERIT)
+    if pin:
+        return SpawnRoleSelection(role, pin, pin, ROLE_SOURCE_ROLE)
+    fallback = _subagent_default_model(cfg)
+    if fallback:
+        return SpawnRoleSelection(role, "", fallback, ROLE_SOURCE_SUBAGENT)
+    return SpawnRoleSelection(role, "", "", ROLE_SOURCE_INHERIT)
+
+
 async def _route_unpinned_start(info: "SubagentInfo", kind: str, sessions: Any) -> None:
     """Route an UNPINNED start through ``model.route``'s derived tiers. Never raises.
 

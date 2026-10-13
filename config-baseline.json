@@ -164,7 +164,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Per-role models",
-      "help": "Optional per-task-class model overrides. Keys: 'background' (lite / heartbeat background workers) and 'subagent' (spawned sub-agents). An empty value or 'auto' defers to the chat default (agent.model) and then to the provider default, so an unpinned role stays usable on every subscription tier. Pin a cheaper model here to run background / sub-agent work on it without changing the interactive chat default.",
+      "help": "Optional per-task-class model overrides. Keys: 'background' (lite / heartbeat background workers), 'subagent' (spawned sub-agents), and 'plan', 'implement' and 'review' (a sub-agent spawn tagged with that role). An empty value or 'auto' defers to the chat default (agent.model) and then to the provider default, so an unpinned role stays usable on every subscription tier; an unpinned plan, implement or review role uses the 'subagent' pin first. Pin a cheaper model here to run background / sub-agent work on it without changing the interactive chat default.",
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {}

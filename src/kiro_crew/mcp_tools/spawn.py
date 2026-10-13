@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 from kiro_crew import mcp_core
 from kiro_crew import resource_status as host_status
 from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.config.sections import SPAWN_ROLE_KEYS
 from kiro_crew.constants import DEFAULT_SUBAGENT_MAX_TURNS, NO_TOOL_CALLS_NOTE
 from kiro_crew.context_management import COMPLETION_KEEP_DEFAULT_CHARS
 from kiro_crew.execution_context import read_session_execution
@@ -70,6 +71,11 @@ _SA_ERROR_MAX_CHARS = 800
 #: that is not answering must cost that thread one short wait, not one
 #: ``_post`` default timeout per unsubmitted task.
 _LOST_REPORT_TIMEOUT_SECS = 5.0
+
+#: The phase roles ``spawn_run`` advertises. The schema's closed enum and the
+#: server's ``SPAWN_ROLE_VALUES`` read the same tuple, so the tool cannot offer
+#: a role the endpoint refuses.
+_SPAWN_ROLE_ENUM: tuple[str, ...] = SPAWN_ROLE_KEYS
 
 # Roster carried in the spawn_run parameter descriptions. Kept small on purpose:
 # a tool description is always-on context in every session, so this buys
@@ -338,6 +344,7 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                                 "model": {"type": "string"},
                                 "reasoning_effort": {"type": "string"},
                                 "backend": {"type": "string"},
+                                "role": {"type": "string", "enum": list(_SPAWN_ROLE_ENUM)},
                             },
                             "required": ["task"],
                             "additionalProperties": False,
@@ -345,9 +352,9 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                         "description": (
                             "Multiple tasks to run in parallel as one wave. Each entry is a "
                             "prompt string, or an object {task, model?, "
-                            "reasoning_effort?, backend?} whose fields override the call's "
-                            "batch-wide value for that task only, e.g. the same review prompt "
-                            "on two models or two backends, delivered together."
+                            "reasoning_effort?, backend?, role?} whose fields override the "
+                            "call's batch-wide value for that task only, e.g. the same review "
+                            "prompt on two models or two backends, delivered together."
                         ),
                     },
                     "agent": {
@@ -428,6 +435,18 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                             "id from THAT backend's list. Batch-wide; a tasks[] object can "
                             "override it per task. A spawn_continue follow-up asks for the "
                             "run's backend."
+                        ),
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": list(_SPAWN_ROLE_ENUM),
+                        "description": (
+                            "Optional phase role: 'plan', 'implement' or 'review'. A "
+                            "subagent with no 'model' of its own runs on the model the "
+                            "owner saved for that role (agent.role_models), else the "
+                            "subagent role model, else the session default; the result "
+                            "names the model each role was given. Batch-wide; a tasks[] "
+                            "object can override it per task."
                         ),
                     },
                     "reasoning_effort": {
@@ -736,6 +755,27 @@ def _collapse_effort_verdicts(
     return [(", ".join(ids), text) for text, ids in grouped.items()]
 
 
+def _role_receipt_text(role: str, model: str, source: str) -> str:
+    """Say which model a role-tagged member was given and where it came from.
+
+    *model* and *source* are the gateway's ``role_model`` / ``role_model_source``
+    (``spawn``, ``role``, ``subagent`` or ``inherit``). The model is
+    caller- or config-supplied text, so it passes through the display redactor
+    before it reaches the calling agent's context.
+    """
+    shown = redact(model) if model else ""
+    if source == "spawn" and shown:
+        return f"model '{shown}' (this call's own model)"
+    if source == "role" and shown:
+        return f"model '{shown}' (agent.role_models.{role})"
+    if source == "subagent" and shown:
+        return f"model '{shown}' (agent.role_models.subagent; agent.role_models.{role} is unset)"
+    return (
+        f"the session default model (agent.role_models.{role} and "
+        "agent.role_models.subagent are unset)"
+    )
+
+
 class _SpawnRunStep(DeferredTool):
     """Submit one task per pool step, then return the background-run receipt."""
 
@@ -875,6 +915,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
     model = args.get("model") or ""
     reasoning_effort = args.get("reasoning_effort") or ""
     backend = args.get("backend") or ""
+    role = args.get("role") or ""
     keep = bool(args.get("keep"))
     # Context scope: absent ⇒ true, so a parent that passes nothing gets the
     # same context a normal session would.
@@ -898,6 +939,9 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
     # (subagent id, note) pairs for a level only session start can judge: with
     # no model pinned the provider binds it to the model the backend serves.
     effort_pendings: list[tuple[str, tuple[str, str]]] = []
+    # (subagent id, (role, receipt text)) pairs: the model each role-tagged
+    # member was given and where it came from, as the gateway reports it.
+    role_receipts: list[tuple[str, tuple[str, str]]] = []
     agent_tasks: list[str] = []
     # subagent id -> the gate's reason, for members the gateway accepted but
     # answered ``status: "queued"`` (deferred, not started).
@@ -963,6 +1007,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
         t_model = over.get("model") or model
         t_effort = over.get("reasoning_effort") or reasoning_effort
         t_backend = over.get("backend") or backend
+        t_role = over.get("role") or role
         if a in refused_agents:
             # Short line on purpose: the full roster is already on the first
             # refusal above, and repeating it once per remaining member would
@@ -990,6 +1035,8 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
             body["reasoning_effort"] = t_effort
         if t_backend:
             body["backend"] = t_backend
+        if t_role:
+            body["role"] = t_role
         if keep:
             body["keep"] = True
         if not inc_memory:
@@ -1048,6 +1095,21 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
             effort_applies.append((str(d.get("id", "?")), (t_effort, str(d["effort_applied"]))))
         if d.get("effort_pending"):
             effort_pendings.append((str(d.get("id", "?")), (t_effort, str(d["effort_pending"]))))
+        receipt_role = d.get("role")
+        if isinstance(receipt_role, str) and receipt_role:
+            role_receipts.append(
+                (
+                    str(d.get("id", "?")),
+                    (
+                        receipt_role,
+                        _role_receipt_text(
+                            receipt_role,
+                            str(d.get("role_model") or ""),
+                            str(d.get("role_model_source") or ""),
+                        ),
+                    ),
+                )
+            )
 
     def _receipt() -> str:
         return _spawn_run_receipt(
@@ -1063,6 +1125,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
             parent_session=parent_session,
             can_work=can_work,
             keep=keep,
+            role_receipts=role_receipts,
         )
 
     return _SpawnRunStep(
@@ -1089,6 +1152,7 @@ def _spawn_run_receipt(
     parent_session: str,
     can_work: bool,
     keep: bool,
+    role_receipts: list[tuple[str, tuple[str, str]]] | None = None,
 ) -> str:
     """Render the accumulated background-run receipt without gateway requests."""
     spawn_lines: list[str] = []
@@ -1111,6 +1175,10 @@ def _spawn_run_receipt(
         # Neither a ✓ nor "dropped": the outcome is decided after this result.
         for pending_ids, (lvl, pending_note) in _collapse_effort_verdicts(effort_pendings):
             spawn_lines.append(f"ℹ reasoning_effort='{lvl}' for {pending_ids}: {pending_note}")
+        # One line per (role, model, source): the model each phase was given,
+        # which an orchestrator copies into its phase summary.
+        for role_ids, (role_name, role_text) in _collapse_effort_verdicts(role_receipts or []):
+            spawn_lines.append(f"ℹ role '{role_name}' for {role_ids}: {role_text}")
     if not parent_session and agent_ids:
         # Orphan alert: without a parent session key the subagents cannot
         # deliver completion events back to this conversation and will

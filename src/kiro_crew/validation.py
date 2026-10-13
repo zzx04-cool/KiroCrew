@@ -40,7 +40,7 @@ from kiro_crew.artifact_store.rules import normalize_tag as _normalize_artifact_
 # no native library is loaded on any platform. Aliased so the schema block below
 # reads as "the computer-use vocabulary" rather than bare names.
 from kiro_crew.computer_use import types as _cu_types
-from kiro_crew.config.sections import SUBAGENT_MAX_TURNS_CEILING
+from kiro_crew.config.sections import SPAWN_ROLE_KEYS, SUBAGENT_MAX_TURNS_CEILING
 
 # ``MAX_SHORT_STRING`` is re-exported, not just used: it is part of this
 # module's surface and 15 other modules read it from here. It is DEFINED in
@@ -1464,6 +1464,11 @@ def validate_jsonrpc_request(req: dict[str, Any]) -> tuple[str, Any, dict[str, A
 #: membership check into a log line or an error message.
 _BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+#: The phase role a ``spawn_run`` call or ``tasks[]`` entry may name. A closed
+#: set: the tag only SELECTS an owner-saved ``agent.role_models`` pin, so it can
+#: never carry a model id of its own. ``""`` means untagged.
+SPAWN_ROLE_VALUES: frozenset[str] = frozenset({"", *SPAWN_ROLE_KEYS})
+
 SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
     tool_name="spawn_run.tasks[]",
     fields=[
@@ -1471,6 +1476,7 @@ SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
         FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
         FieldSpec("reasoning_effort", str, allowed=EFFORT_VALUES),
         FieldSpec("backend", str, max_len=MAX_SHORT_STRING, pattern=_BACKEND_NAME_RE),
+        FieldSpec("role", str, allowed=SPAWN_ROLE_VALUES),
     ],
 )
 
@@ -1522,6 +1528,11 @@ SPAWN_RUN_SCHEMA = ToolSchema(
         # here: whether it is selectable on this gateway is the spawn endpoint's
         # answer, which refuses with the selectable list.
         FieldSpec("backend", str, max_len=MAX_SHORT_STRING, pattern=_BACKEND_NAME_RE),
+        # Optional phase role for the subagent(s): "plan", "implement" or
+        # "review". A run with no model of its own takes
+        # agent.role_models[<role>], then the subagent pin, then the session
+        # default. Batch-wide; a tasks[] object can override it per task.
+        FieldSpec("role", str, allowed=SPAWN_ROLE_VALUES),
         # keep=True makes the run a continuable conversation: its session
         # persists (hibernated on disk) after completion, and spawn_continue
         # can dispatch follow-up turns into it with full prior context.

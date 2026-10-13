@@ -72,6 +72,7 @@ from kiro_crew.config.sections import (
     DECISION_MODEL_ROUTE_TIERS,
     FOLDER_SORT_MODES,
     JUDGE_PROVIDERS,
+    SPAWN_ROLE_KEYS,
     STT_LANGUAGE_AUTO,
     TITLE_REFRESH_EVERY_TURNS_MAX,
     transcribe_vocabulary_name,
@@ -2709,6 +2710,18 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "max_len": 64,
         "pattern": _MODEL_PIN_PATTERN,
         "validate_fn": _validate_role_model,
+    },
+    # The phase roles a tagged spawn_run selects (``spawn_run(role=...)``). Same
+    # grammar and entitlement check as the two worker roles, so a tag can only
+    # ever reach a model this account was already judged able to run.
+    **{
+        f"agent.role_models.{_role}": {
+            "type": "str",
+            "max_len": 64,
+            "pattern": _MODEL_PIN_PATTERN,
+            "validate_fn": _validate_role_model,
+        }
+        for _role in SPAWN_ROLE_KEYS
     },
     # Throttle-exhaustion fallback model. Single value: "auto" (default) defers
     # to the backend's availability-aware routing; a concrete id is tried first

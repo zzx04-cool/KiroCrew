@@ -227,6 +227,7 @@ async def api_spawn(request: web.Request) -> web.Response:
                 "crew": body.get("crew", ""),
                 "target_member": body.get("target_member", ""),
                 "backend": body.get("backend", ""),
+                "role": body.get("role", ""),
             },
             SPAWN_RUN_SCHEMA,
         )
@@ -238,6 +239,19 @@ async def api_spawn(request: web.Request) -> web.Response:
     backend, backend_refusal = await _requested_backend(cleaned.get("backend"))
     if backend_refusal is not None:
         return backend_refusal
+    # A phase-role tag selects the owner's agent.role_models pin for a request
+    # that carries no model of its own. The selected pin then takes every check
+    # an explicit model takes, from the backend's id check below to the
+    # factory's selection at start.
+    role = cleaned.get("role") or ""
+    role_selection = None
+    if role:
+        from kiro_crew.subagent import select_spawn_role_model
+
+        role_selection = await asyncio.to_thread(
+            select_spawn_role_model, role, cleaned.get("model") or ""
+        )
+        cleaned["model"] = role_selection.model
     model_refusal = _qualified_model_refusal(
         request, cleaned.get("model") or "", backend, cleaned.get("backend")
     )
@@ -490,6 +504,13 @@ async def api_spawn(request: web.Request) -> web.Response:
     if keep:
         # The conversation id is the FIRST run's id: spawn_continue targets it.
         resp["conversation"] = info.id
+    if role_selection is not None:
+        # The role receipt: which phase this run is, the model it was given and
+        # where that model came from, so the caller can report each phase's
+        # model. Reporting only, like the effort verdict above.
+        resp["role"] = role_selection.role
+        resp["role_model"] = _redact(role_selection.shown)
+        resp["role_model_source"] = role_selection.source
     return web.json_response(resp)
 
 

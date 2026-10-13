@@ -272,7 +272,18 @@ def normalize_agent_model(model: object) -> str:
 # entitlement-safe on every subscription tier (the provider picks a served
 # model). An operator who deliberately wants a cheaper model for background /
 # sub-agent work pins it here without changing the interactive chat default.
-ROLE_MODEL_KEYS: tuple[str, ...] = ("background", "subagent")
+#
+# The phase roles (plan / implement / review) are the ones a ``spawn_run`` call
+# names with its ``role`` tag. A tagged spawn without a model of its own takes
+# ``role_models[<role>]``; an unpinned phase role falls through to the
+# ``subagent`` pin and then to the session default, so with nothing configured a
+# tagged spawn runs on the model an untagged one does. The tag selects one of
+# these owner-saved pins and never carries a model id itself.
+SPAWN_ROLE_KEYS: tuple[str, ...] = ("plan", "implement", "review")
+ROLE_MODEL_KEYS: tuple[str, ...] = ("background", "subagent", *SPAWN_ROLE_KEYS)
+# agent.role_efforts keeps the two worker roles: a phase role pins a model only,
+# and a tagged spawn's effort follows the per-call value, then the subagent pin.
+ROLE_EFFORT_KEYS: tuple[str, ...] = ("background", "subagent")
 
 # The kiro agents that run the "background" role: auto-titles, memory
 # consolidation, heartbeat polls. Named here rather than inline at the one place
@@ -304,7 +315,7 @@ def coerce_role_models(raw: object) -> dict[str, str]:
 def coerce_role_efforts(raw: object) -> dict[str, str]:
     """Normalize the per-role reasoning-effort map (agent.role_efforts).
 
-    Same role keys as :data:`ROLE_MODEL_KEYS`. Each value must be a concrete,
+    Role keys are :data:`ROLE_EFFORT_KEYS`. Each value must be a concrete,
     valid effort level; ``""`` / an invalid / non-string entry is dropped so the
     stored map carries only real pins — an absent role and an empty one both
     mean "inherit the chat default effort, then the provider/model default".
@@ -312,7 +323,7 @@ def coerce_role_efforts(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     out: dict[str, str] = {}
-    for role in ROLE_MODEL_KEYS:
+    for role in ROLE_EFFORT_KEYS:
         val = raw.get(role)
         if isinstance(val, str) and val.strip() and is_valid_effort(val.strip()):
             out[role] = val.strip()
@@ -1077,12 +1088,14 @@ class AgentConfig:
         metadata=_meta(
             "Per-role models",
             "Optional per-task-class model overrides. Keys: 'background' "
-            "(lite / heartbeat background workers) and 'subagent' (spawned "
-            "sub-agents). An empty value or 'auto' defers to the chat default "
-            "(agent.model) and then to the provider default, so an unpinned "
-            "role stays usable on every subscription tier. Pin a cheaper model "
-            "here to run background / sub-agent work on it without changing the "
-            "interactive chat default.",
+            "(lite / heartbeat background workers), 'subagent' (spawned "
+            "sub-agents), and 'plan', 'implement' and 'review' (a sub-agent "
+            "spawn tagged with that role). An empty value or 'auto' defers to the "
+            "chat default (agent.model) and then to the provider default, so an "
+            "unpinned role stays usable on every subscription tier; an unpinned "
+            "plan, implement or review role uses the 'subagent' pin first. Pin a "
+            "cheaper model here to run background / sub-agent work on it without "
+            "changing the interactive chat default.",
         ),
     )
     role_efforts: dict[str, str] = field(
