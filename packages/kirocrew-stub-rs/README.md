@@ -1,18 +1,24 @@
-# kirocrew-stub-rs (EXPERIMENTAL)
+# kirocrew-stub-rs
 
-A Rust port of `kiro_crew.mcp_gateway.stub`, the shim kiro-cli runs for each stubbed MCP server. It is opt-in, and the Python stub stays the default.
+A Rust port of `kiro_crew.mcp_gateway.stub`, the shim kiro-cli runs for each stubbed MCP server. When its binary is built, the gateway uses it by default; when it is not, the Python stub runs.
 
-## Build and opt in
+## Build
 
 ```bash
-cd packages/kirocrew-stub-rs && cargo build --release
-# then either:
-export KIROCREW_MCP_STUB_IMPL=rust                  # env, wins
-# or in config.json:  "mcp_gateway": {"stub_impl": "rust"}
-# optional binary path: KIROCREW_MCP_STUB_RS_BIN / mcp_gateway.stub_rs_binary
+cd packages/kirocrew-stub-rs && cargo build --release --locked
 ```
 
-If the binary is missing, the Python stub runs. This works on POSIX only.
+The gateway looks for `packages/kirocrew-stub-rs/target/release/kirocrew-mcp-stub-rs` inside the checkout.
+
+## Choose
+
+| `KIROCREW_MCP_STUB_IMPL` (env, wins) or `mcp_gateway.stub_impl` | Stub |
+|---|---|
+| `auto` (default) | Rust if the binary is executable, else Python, no warning |
+| `rust` | Rust; a missing binary keeps Python and logs why |
+| `python` | Python always |
+
+POSIX only; Windows always runs the Python stub.
 
 ## Tests
 
@@ -33,9 +39,16 @@ KIROCREW_TEST_STUB_BIN=$PWD/packages/kirocrew-stub-rs/target/release/kirocrew-mc
 | `tools/list` p95, 6000 calls pooled | 1.37 ms | 1.23 ms |
 | `learn_list` / `find_setting` p95 | 103.4–106.2 ms | 103.0–105.1 ms |
 
+## Handed to the Python stub
+
+The Rust stub execs into the Python stub (same flags, env and stdio, through the interpreter the rewriter recorded) instead of porting these:
+
+- A stub without a verified session token. Identity rung 4 (`session_pid_<pid>.txt` walk) and the shared-host-pid veto on rung 3 stay in Python. Every Kiro Crew session stamps a token, so this is rare.
+- The direct-exec fallback while the gateway cannot serve: refusing an unresolvable `secret://` env (exit 78) and keeping the session token for Kiro Crew's own control plane after gatewayd's vetting. The Python process runs only `fallback_exec`, then becomes the backend.
+
+An overlay that recorded no interpreter keeps the Rust behaviour: the fallback still refuses `secret://`, but always drops the token.
+
 ## Not ported
 
 - Windows (named pipe transport, child-process fallback).
-- Identity rung 4 (`session_pid_<pid>.txt` walk) and the shared-host-pid veto on rung 3. The gateway's peer check and claim-push still name the session.
-- Keeping the session token on a control-plane fallback. The Rust stub always drops it.
 - `KIROCREW_MCP_RECONNECTS` metric and the fallback-rate reader (`fallback_counts`, which gatewayd still runs from Python).

@@ -1,21 +1,26 @@
-"""EXPERIMENTAL opt-in: launch the Rust port of the stub instead of the Python one.
+"""Launch the Rust port of the stub when it is built; else the Python one.
 
 ``packages/kirocrew-stub-rs`` builds ``kirocrew-mcp-stub-rs``, a drop-in for
 ``python -m kiro_crew.mcp_gateway.stub`` that speaks the same Register / bridge /
-reconnect / fallback protocol to gatewayd. The Python stub stays the default;
-the Rust one is chosen only when the operator asks for it:
+reconnect / fallback protocol to gatewayd. It uses about a tenth of the Python
+stub's memory per session. Selection:
 
-* ``KIROCREW_MCP_STUB_IMPL=rust`` (env, wins), or
-* ``mcp_gateway.stub_impl: "rust"`` in ``config.json``.
+* ``KIROCREW_MCP_STUB_IMPL`` (env, wins), else ``mcp_gateway.stub_impl`` in
+  ``config.json``: ``auto`` (default), ``rust`` or ``python``.
+* ``auto`` takes the Rust stub when its binary exists and is executable and
+  silently keeps the Python stub otherwise; ``python`` always keeps it.
 
-The binary is ``KIROCREW_MCP_STUB_RS_BIN``, else ``mcp_gateway.stub_rs_binary``,
-else the crate's own release build inside this checkout. A missing or
-non-executable binary keeps the Python stub and logs why, so the opt-in can
-never cost a session its servers.
+Build: ``cargo build --release --locked`` in ``packages/kirocrew-stub-rs``.
+The binary is the crate's own release build inside this checkout. A missing or
+non-executable binary keeps the Python stub, so the Rust stub can never cost a
+session its servers.
 
-The config keys are read RAW (``_raw_config``) rather than declared on
-``McpGatewayConfig``: this is an experiment, and a declared field would put it
-on the Settings surface and in the config baseline.
+The Rust stub hands itself to the Python stub (same flags, env and stdio) for
+what it does not port: a stub without a verified session token, and the
+direct-exec fallback while the gateway cannot serve.
+
+The config key is read RAW (``_raw_config``) rather than declared on
+``McpGatewayConfig``: it is an operator escape hatch, not a Settings control.
 
 POSIX only: the Rust port has no named-pipe transport.
 """
@@ -37,7 +42,6 @@ logger = logging.getLogger(__name__)
 RUST_STUB_BIN_NAME = "kirocrew-mcp-stub-rs"
 
 _IMPL_ENV = "KIROCREW_MCP_STUB_IMPL"
-_BIN_ENV = "KIROCREW_MCP_STUB_RS_BIN"
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
 _warned: set[str] = set()
@@ -73,20 +77,26 @@ def _warn_once(msg: str) -> None:
 
 
 def rust_stub_binary() -> Optional[str]:
-    """The Rust stub to launch, or ``None`` to keep the Python stub."""
+    """The Rust stub to launch, or ``None`` to keep the Python stub.
+
+    ``auto`` (the default) uses the Rust stub whenever its binary is present
+    and executable and otherwise keeps the Python stub without a warning: an
+    install without the built binary is normal. ``rust`` asks for it
+    explicitly, so a missing binary is logged. ``python`` never uses it.
+    """
     if sys.platform == "win32":
         return None
     section = _raw_gateway_section()
-    impl = (os.environ.get(_IMPL_ENV) or str(section.get("stub_impl") or "python")).strip().lower()
-    if impl != "rust":
+    impl = (os.environ.get(_IMPL_ENV) or str(section.get("stub_impl") or "auto")).strip().lower()
+    if impl not in ("rust", "auto"):
         return None
-    raw = os.environ.get(_BIN_ENV) or str(section.get("stub_rs_binary") or "")
-    path = Path(raw).expanduser() if raw else _default_binary()
+    path = _default_binary()
     if not (path.is_file() and os.access(path, os.X_OK)):
-        _warn_once(
-            f"mcp_gateway.stub_impl=rust but {path} is not an executable file; "
-            "keeping the Python stub"
-        )
+        if impl == "rust":
+            _warn_once(
+                f"mcp_gateway.stub_impl={impl} but {path} is not an executable file; "
+                "keeping the Python stub"
+            )
         return None
     return str(path)
 
@@ -98,6 +108,11 @@ def install_context_b64() -> str:
     ``sys.executable`` and the package location of the process that runs them.
     The Rust stub has neither, so the rewriter hands it this process's values:
     the same ones a Python stub launched from this overlay would compute.
+
+    ``python_argv`` is the interpreter prefix the rewriter would launch a Python
+    stub with. The Rust stub execs into the Python one through it for what the
+    port leaves to Python: a stub without a verified session token, and the
+    direct-exec fallback while the gateway cannot serve.
     """
     try:
         from importlib.metadata import PackageNotFoundError, version
@@ -108,6 +123,7 @@ def install_context_b64() -> str:
             dist = "unknown"
     except Exception:  # pragma: no cover - importlib.metadata is stdlib
         dist = "unknown"
+    from kiro_crew import platform_compat
     from kiro_crew.code_fingerprint import _PACKAGE_ROOT
     from kiro_crew.mcp_gateway.hashing import _package_dir
 
@@ -118,6 +134,7 @@ def install_context_b64() -> str:
         "package_dir": _package_dir(),
         "fingerprint_root": str(_PACKAGE_ROOT),
         "dist_version": dist,
+        "python_argv": platform_compat.isolated_python_argv(),
     }
     raw = json.dumps(ctx, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")

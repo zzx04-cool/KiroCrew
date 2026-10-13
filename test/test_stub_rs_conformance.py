@@ -1,6 +1,6 @@
-"""Conformance: the EXPERIMENTAL Rust stub behaves like ``kiro_crew.mcp_gateway.stub``.
+"""Conformance: the Rust stub behaves like ``kiro_crew.mcp_gateway.stub``.
 
-``packages/kirocrew-stub-rs`` is an opt-in drop-in (``mcp_gateway.stub_impl``).
+``packages/kirocrew-stub-rs`` is a drop-in (``mcp_gateway.stub_impl``).
 "Drop-in" is a claim about behaviour seen from OUTSIDE the process, so every
 case here drives a real stub PROCESS -- the Python module and the Rust binary
 side by side, through the same assertions -- against either a real gatewayd or a
@@ -38,6 +38,7 @@ from kiro_crew.mcp_gateway import stub as pystub
 from kiro_crew.mcp_gateway import transport
 from kiro_crew.mcp_gateway.hashing import encode_target_args
 from kiro_crew.mcp_gateway.stub_impl import RUST_STUB_BIN_NAME, install_context_b64
+from kiro_crew.testing.wait import async_wait_until
 
 pytestmark = [
     pytest.mark.xdist_group("mcp_gateway"),
@@ -102,19 +103,27 @@ def _publish_token(home: Path, token: str, key: str) -> None:
 
     trust = home / "trust"
     trust.mkdir(parents=True, exist_ok=True)
-    root = secrets.token_bytes(32)
-    (trust / "sel_hmac.key").write_bytes(root)
+    key_file = trust / "sel_hmac.key"
+    # One root per home: a second token, or a daemon that already loaded the
+    # key, must keep verifying.
+    if not key_file.exists():
+        key_file.write_bytes(secrets.token_bytes(32))
+    root = key_file.read_bytes()
     path = sig._sig_path(token, home)
     path.write_text(f"{sig._compute_sig(root, token, key)}\n{key}", encoding="utf-8")
 
 
 def _rust_payload(flags: list[str], env: dict[str, str], cwd: Path) -> dict[str, Any]:
+    # The binary is the operator's own KIROCREW_TEST_STUB_BIN (or the crate's
+    # build) and argv is a list with no shell, so nothing here is injectable.
+    argv = [str(_RUST_BIN), *_flags("rust", flags)]
     out = subprocess.run(
-        [str(_RUST_BIN), *_flags("rust", flags)],
+        argv,  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
         env={**env, "KIROCREW_STUB_RS_DUMP_REGISTER": "1"},
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=60,
         check=True,
     )
@@ -131,7 +140,13 @@ def _py_payload(flags: list[str], env: dict[str, str], cwd: Path) -> dict[str, A
     )
     out = subprocess.run(
         [sys.executable, "-c", code, *_flags("python", flags)],
-        env=env, cwd=str(cwd), capture_output=True, text=True, timeout=120, check=True,
+        env=env,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=True,
     )
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -157,36 +172,64 @@ def _cases(tmp: Path) -> dict[str, tuple[list[str], dict[str, str]]]:
     return {
         "managed_control_plane": (
             [
-                "--server", "kirocrew-core", "--agent", "kirocrew",
-                "--target-command", str(venv_kirocrew),
+                "--server",
+                "kirocrew-core",
+                "--agent",
+                "kirocrew",
+                "--target-command",
+                str(venv_kirocrew),
                 f"--target-args-b64={encode_target_args(['mcp-core'])}",
-                "--sandbox-mode", "off", "--work-dir", str(tmp),
-                "--approval-mode", "auto", "--poolable", "--trust-all",
-                "--env-file", str(env_file),
-                "--pool-identity-env-b64", encode_target_args(["AWS_SECRET_ACCESS_KEY"]),
-                "--auto-approve", json.dumps(["b", "a,c"]),
-                "--channel-id", "C123",
+                "--sandbox-mode",
+                "off",
+                "--work-dir",
+                str(tmp),
+                "--approval-mode",
+                "auto",
+                "--poolable",
+                "--trust-all",
+                "--env-file",
+                str(env_file),
+                "--pool-identity-env-b64",
+                encode_target_args(["AWS_SECRET_ACCESS_KEY"]),
+                "--auto-approve",
+                json.dumps(["b", "a,c"]),
+                "--channel-id",
+                "C123",
             ],
             {"KIROCREW_STUB_SESSION_TOKEN": token},
         ),
         "install_interpreter_app": (
             [
-                "--server", "some-app", "--agent", "probe",
-                "--target-command", sys.executable,
+                "--server",
+                "some-app",
+                "--agent",
+                "probe",
+                "--target-command",
+                sys.executable,
                 f"--target-args-b64={encode_target_args(['-m', 'kiro_crew.apps.x', ''])}",
-                "--work-dir", "relative/does/not/exist",
-                "--env-json", json.dumps({"K": "V", "AWS_SESSION_TOKEN": "x"}),
+                "--work-dir",
+                "relative/does/not/exist",
+                "--env-json",
+                json.dumps({"K": "V", "AWS_SESSION_TOKEN": "x"}),
             ],
             {"KIROCREW_SESSION_KEY": "cron:nightly", "KIROCREW_CHANNEL_ID": "D9"},
         ),
         "legacy_plain_flags": (
             [
-                "--server", "third-party", "--agent", "a",
-                "--target-command", "definitely-not-on-path",
-                "--target-args", "x|y||z",
-                "--work-dir", str(tmp),
-                "--env", "A=1,B=2=3,broken",
-                "--auto-approve", "t1,t2",
+                "--server",
+                "third-party",
+                "--agent",
+                "a",
+                "--target-command",
+                "definitely-not-on-path",
+                "--target-args",
+                "x|y||z",
+                "--work-dir",
+                str(tmp),
+                "--env",
+                "A=1,B=2=3,broken",
+                "--auto-approve",
+                "t1,t2",
             ],
             {"KIROCREW_SESSION_KEY": "U123:thread"},
         ),
@@ -194,7 +237,9 @@ def _cases(tmp: Path) -> dict[str, tuple[list[str], dict[str, str]]]:
 
 
 @pytest.mark.skipif(not _RUST_BIN.is_file(), reason="Rust stub not built")
-@pytest.mark.parametrize("case", ["managed_control_plane", "install_interpreter_app", "legacy_plain_flags"])
+@pytest.mark.parametrize(
+    "case", ["managed_control_plane", "install_interpreter_app", "legacy_plain_flags"]
+)
 def test_register_payload_matches_python(case: str, tmp_path: Path) -> None:
     """Every PoolKey field equal, so a Rust and a Python stub share one pool."""
     (tmp_path / "home").mkdir()
@@ -222,8 +267,11 @@ def _init(i: int) -> bytes:
                 "jsonrpc": "2.0",
                 "id": i,
                 "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                           "clientInfo": {"name": "conformance", "version": "0"}},
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "conformance", "version": "0"},
+                },
             }
         )
         + "\n"
@@ -232,8 +280,14 @@ def _init(i: int) -> bytes:
 
 def _call(i: int, name: str = "noop") -> bytes:
     return (
-        json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
-                    "params": {"name": name, "arguments": {}}})
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": i,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": {}},
+            }
+        )
         + "\n"
     ).encode()
 
@@ -259,11 +313,32 @@ async def _send(proc: asyncio.subprocess.Process, data: bytes) -> None:
     await proc.stdin.drain()
 
 
-async def _spawn(impl: str, flags: list[str], env: dict[str, str], cwd: Path):
+async def _spawn(
+    impl: str,
+    flags: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    *,
+    token: bool = True,
+    rendered: list[str] | None = None,
+):
+    """Start a stub. Like every Kiro Crew session, it carries a signed session
+    token naming ``KIROCREW_SESSION_KEY`` (or a fixed key), so the Rust stub
+    stays Rust: without one it hands itself to the Python stub (``token=False``
+    tests exactly that). ``rendered`` overrides the envelope ``_flags`` builds."""
+    if token and "KIROCREW_STUB_SESSION_TOKEN" not in env:
+        value = "tok-" + secrets.token_hex(8)
+        key = env.get("KIROCREW_SESSION_KEY") or "dashboard:conformance"
+        _publish_token(Path(env["KIROCREW_HOME"]), value, key)
+        env = {**env, "KIROCREW_STUB_SESSION_TOKEN": value}
     return await asyncio.create_subprocess_exec(
-        *_launcher(impl), *_flags(impl, flags),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env,
+        *_launcher(impl),
+        *(rendered if rendered is not None else _flags(impl, flags)),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(cwd),
+        env=env,
         limit=64 * 1024 * 1024,
     )
 
@@ -281,38 +356,75 @@ async def _finish(proc: asyncio.subprocess.Process, timeout: float = 15.0) -> in
 
 def _base_flags(sock: Path, wd: Path, server: str = "fake") -> list[str]:
     return [
-        "--server", server, "--agent", "probe",
-        "--target-command", sys.executable,
+        "--server",
+        server,
+        "--agent",
+        "probe",
+        "--target-command",
+        sys.executable,
         # The fake backend needs its launch-log path when exec'd directly.
-        "--target-args", f"{_FAKE_SERVER}|{wd / 'direct-launch.txt'}",
-        "--work-dir", str(wd), "--socket", str(sock),
-        "--sandbox-mode", "off", "--approval-mode", "auto", "--poolable",
+        "--target-args",
+        f"{_FAKE_SERVER}|{wd / 'direct-launch.txt'}",
+        "--work-dir",
+        str(wd),
+        "--socket",
+        str(sock),
+        "--sandbox-mode",
+        "off",
+        "--approval-mode",
+        "auto",
+        "--poolable",
     ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impl", IMPLS)
-async def test_round_trip_through_a_real_gatewayd(impl: str, tmp_path: Path, short_sock_dir) -> None:
+async def test_round_trip_through_a_real_gatewayd(
+    impl: str, tmp_path: Path, short_sock_dir
+) -> None:
     sock = Path(short_sock_dir) / "gw.sock"
     home = tmp_path / "home"
     home.mkdir()
     launch_log, caller_log = tmp_path / "launch.txt", tmp_path / "callers.txt"
 
     def resolver(_key: object):
-        return sys.executable, [str(_FAKE_SERVER), str(launch_log), str(caller_log)], {}, str(tmp_path)
+        return (
+            sys.executable,
+            [str(_FAKE_SERVER), str(launch_log), str(caller_log)],
+            {},
+            str(tmp_path),
+        )
 
     stop = asyncio.Event()
     daemon = asyncio.create_task(
-        gw.run_gatewayd(socket_path=sock, max_backends=4, idle_timeout_secs=60,
-                        stop_event=stop, target_resolver=resolver, prewarm_count=0)
+        gw.run_gatewayd(
+            socket_path=sock,
+            max_backends=4,
+            idle_timeout_secs=60,
+            stop_event=stop,
+            target_resolver=resolver,
+            prewarm_count=0,
+        )
     )
     try:
-        for _ in range(200):
-            if transport.endpoint_exists(sock):
-                break
-            await asyncio.sleep(0.05)
-        proc = await _spawn(impl, _base_flags(sock, tmp_path),
-                            _env(home, KIROCREW_SESSION_KEY=f"dashboard:{impl}"), tmp_path)
+        await async_wait_until(
+            lambda: transport.endpoint_exists(sock),
+            off_loop=True,
+            describe=lambda: f"gatewayd socket {sock} never appeared",
+        )
+        # Identity by KIROCREW_SESSION_KEY, not a token: a token names a
+        # session only once the runtime's claim binds it, and this daemon gets
+        # no claim. With no recorded interpreter the Rust stub keeps that rung
+        # itself rather than handing over, so its own bridge is what runs here.
+        flags = _base_flags(sock, tmp_path)
+        proc = await _spawn(
+            impl,
+            flags,
+            _env(home, KIROCREW_SESSION_KEY=f"dashboard:{impl}"),
+            tmp_path,
+            token=False,
+            rendered=_rust_flags_without_python(flags) if impl == "rust" else None,
+        )
         await _send(proc, _init(1))
         assert "result" in await _reply(proc, 1)
         for i in range(2, 12):
@@ -369,8 +481,14 @@ async def _echo_loop(r: asyncio.StreamReader, w: asyncio.StreamWriter, seen: lis
             _w(w, {"type": "pong"})
             _w(w, {"type": "queued", "position": 1})
             if msg["method"] == "tools/call" and msg["params"]["name"] == "big":
-                _w(w, {"jsonrpc": "2.0", "id": msg["id"],
-                       "result": {"content": [{"type": "text", "text": "x" * (5 * 1024 * 1024)}]}})
+                _w(
+                    w,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": {"content": [{"type": "text", "text": "x" * (5 * 1024 * 1024)}]},
+                    },
+                )
             else:
                 _w(w, {"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}})
         await w.drain()
@@ -378,12 +496,20 @@ async def _echo_loop(r: asyncio.StreamReader, w: asyncio.StreamWriter, seen: lis
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impl", IMPLS)
-async def test_control_frames_are_swallowed_and_big_frames_pass(impl, tmp_path, short_sock_dir) -> None:
+async def test_control_frames_are_swallowed_and_big_frames_pass(
+    impl, tmp_path, short_sock_dir
+) -> None:
     sock = Path(short_sock_dir) / "fake.sock"
     seen: list[dict] = []
 
     async def handler(r, w, reg):
-        _w(w, {"type": "registered", "capabilities": ["poolable_ack", "bridge_ping", "ensure_backend"]})
+        _w(
+            w,
+            {
+                "type": "registered",
+                "capabilities": ["poolable_ack", "bridge_ping", "ensure_backend"],
+            },
+        )
         await w.drain()
         ensure = json.loads(await r.readline())
         assert ensure["type"] == "ensure_backend"
@@ -413,7 +539,11 @@ async def test_control_frames_are_swallowed_and_big_frames_pass(impl, tmp_path, 
         assert regs[0]["type"] == "register" and regs[0]["poolable"] is True
         # Forwarded verbatim, then the clean-EOF unregister.
         assert [m.get("method") for m in seen if "method" in m] == [
-            "initialize", "tools/call", "notifications/initialized", "tools/call"]
+            "initialize",
+            "tools/call",
+            "notifications/initialized",
+            "tools/call",
+        ]
         assert seen[-1] == {"type": "unregister"}
     finally:
         server.close()
@@ -449,6 +579,79 @@ async def test_no_gateway_degrades_to_the_real_backend(impl, tmp_path, short_soc
     assert oct((home / "logs" / "stub_fallback.jsonl").stat().st_mode & 0o777) == "0o600"
 
 
+_HANDOFF_LINE = "handing this stub to the Python implementation"
+
+
+def _rust_flags_without_python(flags: list[str]) -> list[str]:
+    """The Rust envelope with an install context that records no interpreter
+    prefix, as an overlay from before ``python_argv`` would: no hand-over."""
+    ctx = json.loads(base64.urlsafe_b64decode(install_context_b64()))
+    ctx.pop("python_argv", None)
+    raw = base64.urlsafe_b64encode(json.dumps(ctx).encode()).decode()
+    return [f"--stub-flags-b64={encode_target_args([*flags, '--install-context-b64', raw])}"]
+
+
+@pytest.mark.skipif(not _RUST_BIN.is_file(), reason="Rust stub not built")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [True, False], ids=["token", "no-token"])
+async def test_rust_hands_a_stub_without_a_verified_token_to_python(
+    token, tmp_path, short_sock_dir
+) -> None:
+    """Identity beyond the signed token (the co-tenancy veto, the pid-mapping
+    walk) is Python-only, so a tokenless Rust stub becomes a Python one."""
+    home = tmp_path / "home"
+    home.mkdir()
+    sock = Path(short_sock_dir) / "absent.sock"
+    env = _env(home, KIROCREW_SESSION_KEY="dashboard:env-only", KIROCREW_MCP_LOG="INFO")
+    proc = await _spawn("rust", _base_flags(sock, tmp_path), env, tmp_path, token=token)
+    await _assert_direct_backend(proc)
+    await _finish(proc)
+    assert proc.stderr is not None
+    err = (await proc.stderr.read()).decode("utf-8", "replace")
+    assert (_HANDOFF_LINE in err) is (not token)
+    # Exactly one fallback record either way: the Python stub writes it after a
+    # hand-over, the Rust one otherwise.
+    assert len(_fallback_records(home)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "impl, direct",
+    [
+        ("python", False),
+        *[
+            pytest.param("rust", d, marks=IMPLS[1].marks, id=f"rust-{n}")
+            for d, n in ((False, "via-python"), (True, "direct"))
+        ],
+    ],
+)
+async def test_fallback_refuses_an_unresolved_secret_reference(
+    impl, direct, tmp_path, short_sock_dir
+) -> None:
+    """A direct exec cannot read the vault, so a declared ``secret://`` value
+    stops the start (exit 78) and names the key, never the reference."""
+    home = tmp_path / "home"
+    home.mkdir()
+    sock = Path(short_sock_dir) / "absent.sock"
+    env_file = tmp_path / "declared.json"
+    env_file.write_text(
+        json.dumps({"API_KEY": "secret://vault/very-private-name", "PLAIN": "v"}),
+        encoding="utf-8",
+    )
+    flags = [*_base_flags(sock, tmp_path), "--env-file", str(env_file)]
+    rendered = _rust_flags_without_python(flags) if direct else None
+    proc = await _spawn(impl, flags, _env(home), tmp_path, rendered=rendered)
+    assert proc.stdin is not None
+    proc.stdin.close()
+    rc = await asyncio.wait_for(proc.wait(), timeout=_TIMEOUT)
+    assert proc.stderr is not None
+    err = (await proc.stderr.read()).decode("utf-8", "replace")
+    assert rc == 78, err
+    assert "'API_KEY'" in err and "secret://" in err
+    assert "very-private-name" not in err
+    assert not (tmp_path / "direct-launch.txt").exists(), "the backend must not start"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impl", IMPLS)
 async def test_stale_code_generation_degrades(impl, tmp_path, short_sock_dir) -> None:
@@ -457,8 +660,14 @@ async def test_stale_code_generation_degrades(impl, tmp_path, short_sock_dir) ->
 
     async def handler(r, w, reg):
         assert reg.get("stub_code_fingerprint")
-        _w(w, {"type": "registered", "fingerprint": "some-other-generation",
-               "capabilities": ["poolable_ack"]})
+        _w(
+            w,
+            {
+                "type": "registered",
+                "fingerprint": "some-other-generation",
+                "capabilities": ["poolable_ack"],
+            },
+        )
         await w.drain()
         await r.read()
 
@@ -479,16 +688,32 @@ async def test_stale_code_generation_degrades(impl, tmp_path, short_sock_dir) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impl", IMPLS)
-async def test_capacity_refusal_answers_typed_errors_and_stays_open(impl, tmp_path, short_sock_dir) -> None:
+async def test_capacity_refusal_answers_typed_errors_and_stays_open(
+    impl, tmp_path, short_sock_dir
+) -> None:
     sock = Path(short_sock_dir) / "cap.sock"
 
     async def handler(r, w, reg):
-        _w(w, {"type": "registered", "capabilities": ["poolable_ack", "ensure_backend", "spawn_queue"]})
+        _w(
+            w,
+            {
+                "type": "registered",
+                "capabilities": ["poolable_ack", "ensure_backend", "spawn_queue"],
+            },
+        )
         await w.drain()
         ensure = json.loads(await r.readline())
         assert ensure["wait_budget_secs"] > 0
         _w(w, {"type": "queued", "position": 3})
-        _w(w, {"type": "rejected", "class": "capacity", "reason": "host full", "retry_after_secs": 42})
+        _w(
+            w,
+            {
+                "type": "rejected",
+                "class": "capacity",
+                "reason": "host full",
+                "retry_after_secs": 42,
+            },
+        )
         await w.drain()
 
     server, _ = await _fake_gateway(sock, handler)
@@ -558,7 +783,9 @@ async def test_untagged_unknown_target_falls_back(impl, tmp_path, short_sock_dir
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("impl", IMPLS)
-async def test_unshareable_server_refuses_a_daemon_without_poolable_ack(impl, tmp_path, short_sock_dir) -> None:
+async def test_unshareable_server_refuses_a_daemon_without_poolable_ack(
+    impl, tmp_path, short_sock_dir
+) -> None:
     sock = Path(short_sock_dir) / "ack.sock"
 
     async def handler(r, w, reg):
@@ -608,7 +835,9 @@ async def test_rust_liveness_fails_a_call_to_a_silent_peer(tmp_path, short_sock_
     try:
         home = tmp_path / "home"
         home.mkdir()
-        env = _env(home, KIROCREW_STUB_RS_PING_INTERVAL="0.2", KIROCREW_STUB_RS_RECONNECT_BUDGET="0.5")
+        env = _env(
+            home, KIROCREW_STUB_RS_PING_INTERVAL="0.2", KIROCREW_STUB_RS_RECONNECT_BUDGET="0.5"
+        )
         proc = await _spawn("rust", _base_flags(sock, tmp_path), env, tmp_path)
         await _send(proc, _init(1))
         await _reply(proc, 1)
@@ -621,25 +850,50 @@ async def test_rust_liveness_fails_a_call_to_a_silent_peer(tmp_path, short_sock_
         server.close()
 
 
-def test_rewriter_launches_the_rust_stub_only_when_opted_in(tmp_path, monkeypatch) -> None:
-    """Default stays Python; the opt-in swaps only the launch line."""
+def test_rewriter_picks_the_rust_stub_when_built_and_python_otherwise(
+    tmp_path, monkeypatch
+) -> None:
+    """Default is auto: Rust when the binary is there, Python when it is not."""
     from kiro_crew.mcp_gateway import stub_impl
 
     fake_bin = tmp_path / RUST_STUB_BIN_NAME
     fake_bin.write_text("#!/bin/sh\n")
     fake_bin.chmod(0o755)
+    missing = tmp_path / "missing" / RUST_STUB_BIN_NAME
     monkeypatch.delenv("KIROCREW_MCP_STUB_IMPL", raising=False)
     monkeypatch.setattr(stub_impl, "_raw_gateway_section", lambda: {})
-    assert stub_impl.rust_stub_binary() is None
-    monkeypatch.setenv("KIROCREW_MCP_STUB_IMPL", "rust")
-    monkeypatch.setenv("KIROCREW_MCP_STUB_RS_BIN", str(fake_bin))
+    # auto (no setting at all): the built binary is used ...
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: fake_bin)
     assert stub_impl.rust_stub_binary() == str(fake_bin)
-    monkeypatch.setenv("KIROCREW_MCP_STUB_RS_BIN", str(tmp_path / "missing"))
+    # ... and an install without it keeps the Python stub, quietly.
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: missing)
+    stub_impl._warned.clear()
+    assert stub_impl.rust_stub_binary() is None
+    assert not stub_impl._warned, "auto must not warn about a binary that was never built"
+    # A binary that is there but not executable also keeps Python.
+    not_exec = tmp_path / "noexec"
+    not_exec.write_text("x")
+    not_exec.chmod(0o644)
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: not_exec)
+    assert stub_impl.rust_stub_binary() is None
+    # python forces the Python stub even when the binary is there.
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: fake_bin)
+    monkeypatch.setenv("KIROCREW_MCP_STUB_IMPL", "python")
+    assert stub_impl.rust_stub_binary() is None
+    monkeypatch.setattr(stub_impl, "_raw_gateway_section", lambda: {"stub_impl": "rust"})
+    assert stub_impl.rust_stub_binary() is None, "the env setting wins over config"
+    # Explicit rust with a missing binary keeps Python and says why.
+    monkeypatch.setenv("KIROCREW_MCP_STUB_IMPL", "rust")
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: missing)
+    stub_impl._warned.clear()
     assert stub_impl.rust_stub_binary() is None, "a missing binary must keep the Python stub"
+    assert stub_impl._warned
+    monkeypatch.setattr(stub_impl, "_default_binary", lambda: fake_bin)
+    assert stub_impl.rust_stub_binary() == str(fake_bin)
     monkeypatch.delenv("KIROCREW_MCP_STUB_IMPL")
-    monkeypatch.delenv("KIROCREW_MCP_STUB_RS_BIN")
-    monkeypatch.setattr(stub_impl, "_raw_gateway_section",
-                        lambda: {"stub_impl": "rust", "stub_rs_binary": str(fake_bin)})
+    monkeypatch.setattr(stub_impl, "_raw_gateway_section", lambda: {"stub_impl": "rust"})
     assert stub_impl.rust_stub_binary() == str(fake_bin)
     ctx = json.loads(base64.urlsafe_b64decode(stub_impl.install_context_b64()))
     assert ctx["interpreter"] == sys.executable
+    # The prefix the Rust stub execs the Python one through on a hand-over.
+    assert ctx["python_argv"][0] == sys.executable
